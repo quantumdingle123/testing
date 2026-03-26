@@ -55,7 +55,7 @@ local function tweenTo()
 	return t
 end
 
--- Reset Character Function
+-- Reset Character Function (Remote)
 local function safetyReset()
     local remote = ReplicatedStorage:WaitForChild("Remote", 3):WaitForChild("ResetCharacterRequested", 3)
     if remote then
@@ -63,6 +63,7 @@ local function safetyReset()
     end
 end
 
+-- The Farming Loop
 task.spawn(function()
 	while not dead do
 		task.wait(0.5)
@@ -1492,7 +1493,7 @@ task.spawn(function()
 end)
 
 --=========================================
--- UPDATED DETECTION & SAFETY LOGIC
+-- UPDATED DETECTION & INSTANT DEATH LOGIC
 --=========================================
 RunService.RenderStepped:Connect(function(deltaTime)
 	if not detectionEnabled or not detectionPosition then return end
@@ -1522,7 +1523,7 @@ RunService.RenderStepped:Connect(function(deltaTime)
                             dangerFound = true
                             if not detectedPlayers[targetPlayer] then
 							    detectedPlayers[targetPlayer] = true
-							    notify("⚠️ Player Detected", targetPlayer.Name .. " entered! Resetting...")
+							    notify("⚠️ Player Detected", targetPlayer.Name .. " entered! Terminating...")
                             end
 						elseif not inside and detectedPlayers[targetPlayer] then
 							detectedPlayers[targetPlayer] = nil
@@ -1542,14 +1543,21 @@ RunService.RenderStepped:Connect(function(deltaTime)
 		end
 	end
 
-    -- Handle Reset and Resume
+    -- Handle Instant Death, Reset and Resume
     if dangerFound then
         if running then
             savedRole = role
             running = false
             isPausedForSafety = true
             updateFarmBtns()
-            setStatus("SAFETY RESET")
+            setStatus("TERMINATING")
+            
+            -- INSTANT DEATH LOGIC
+            if hum then
+                hum.Health = 0
+            end
+            
+            -- Redundant Safety Call
             safetyReset()
         end
     else
@@ -1557,7 +1565,8 @@ RunService.RenderStepped:Connect(function(deltaTime)
             isPausedForSafety = false
             notify("Safe", "Area clear. Resuming in 5s...")
             task.delay(5, function()
-                if not isPausedForSafety and savedRole then
+                -- Ensure no new danger appeared and we are back in character
+                if not isPausedForSafety and savedRole and alive() then
                     role = savedRole
                     running = true
                     updateFarmBtns()
