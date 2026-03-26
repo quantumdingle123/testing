@@ -5,9 +5,18 @@ local UserInputService = game:GetService("UserInputService")
 local TweenService = game:GetService("TweenService")
 local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local VirtualUser = game:GetService("VirtualUser")
 
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
+
+--=========================================
+-- ANTI-IDLE (ANTI-AFK) LOGIC
+--=========================================
+player.Idled:Connect(function()
+    VirtualUser:CaptureController()
+    VirtualUser:ClickButton2(Vector2.new())
+end)
 
 --=========================================
 -- ASYLUM FARM CORE LOGIC
@@ -53,14 +62,6 @@ local function tweenTo()
 	local t = TweenService:Create(root, TI, { CFrame = DEST })
 	t:Play()
 	return t
-end
-
--- Reset Character Function (Remote)
-local function safetyReset()
-    local remote = ReplicatedStorage:WaitForChild("Remote", 3):WaitForChild("ResetCharacterRequested", 3)
-    if remote then
-        remote:FireServer()
-    end
 end
 
 -- The Farming Loop
@@ -1543,7 +1544,7 @@ RunService.RenderStepped:Connect(function(deltaTime)
 		end
 	end
 
-    -- Handle Instant Death, Reset and Resume
+    -- Handle Instant Death and Resume
     if dangerFound then
         if running then
             savedRole = role
@@ -1556,9 +1557,6 @@ RunService.RenderStepped:Connect(function(deltaTime)
             if hum then
                 hum.Health = 0
             end
-            
-            -- Redundant Safety Call
-            safetyReset()
         end
     else
         if isPausedForSafety and not dangerFound then
