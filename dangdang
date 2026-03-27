@@ -11,6 +11,7 @@ local PathfindingService = game:GetService("PathfindingService")
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
 
+-- Anti-AFK
 player.Idled:Connect(function()
 	VirtualUser:CaptureController()
 	VirtualUser:ClickButton2(Vector2.new())
@@ -24,6 +25,7 @@ local RING_SIZE = Vector3.new(26, 12, 26)
 local RING_ROTATION_Y = -30
 local ringCFrame = CFrame.new(RING_POSITION) * CFrame.Angles(0, math.rad(RING_ROTATION_Y), 0)
 
+-- Visualizing the Ring
 local ringVisualsFolder = workspace:FindFirstChild("RingVisuals")
 if not ringVisualsFolder then
 	ringVisualsFolder = Instance.new("Folder")
@@ -57,6 +59,7 @@ if not ringVisualsFolder then
 	centerMarker.Parent = ringVisualsFolder
 end
 
+-- Bot State
 local dead = false
 local role = nil
 local running = false
@@ -66,28 +69,30 @@ local savedRole = nil
 local setStatus = function(txt) end
 local updateFarmBtns = function() end
 
-local char, hum, root
+-- ==========================================
+-- Character & Movement Logic
+-- ==========================================
 
-local function refreshChar()
-	char = player.Character or player.CharacterAdded:Wait()
-	hum = char:WaitForChild("Humanoid")
-	root = char:WaitForChild("HumanoidRootPart")
+-- 1. Get the freshest character parts dynamically to prevent stale variables
+local function getLatest()
+	local c = player.Character
+	local h = c and c:FindFirstChildOfClass("Humanoid")
+	local r = c and c:FindFirstChild("HumanoidRootPart")
+	return c, h, r
 end
 
+-- 2. Check if player is alive dynamically
 local function alive()
-	return char and hum and root and hum.Health > 0 and char.Parent ~= nil
+	local c, h, r = getLatest()
+	return c and h and r and h.Health > 0 and c.Parent ~= nil
 end
 
-refreshChar()
-player.CharacterAdded:Connect(function()
-	task.wait(0.8)
-	refreshChar()
-end)
-
+-- 3. Check if player is in the ring dynamically
 local function inRing()
 	if not alive() then return false end
+	local c, h, r = getLatest()
 	
-	local relative = ringCFrame:PointToObjectSpace(root.Position)
+	local relative = ringCFrame:PointToObjectSpace(r.Position)
 	local halfSize = RING_SIZE / 2
 
 	return math.abs(relative.X) <= halfSize.X
@@ -95,16 +100,27 @@ local function inRing()
 		and math.abs(relative.Z) <= halfSize.Z
 end
 
-local noclipConnection = nil
+-- 4. Helper to stop the character when toggling off
+local function stopCharacter()
+	local c, h, r = getLatest()
+	if h and r then
+		h:MoveTo(r.Position) 
+	end
+end
 
+-- Noclip Logic
+local noclipConnection = nil
 local function toggleNoclip(state)
 	if state then
 		if not noclipConnection then
 			noclipConnection = RunService.Stepped:Connect(function()
 				if alive() then
-					for _, v in ipairs(char:GetChildren()) do
-						if v:IsA("BasePart") then
-							v.CanCollide = false
+					local c = getLatest()
+					if c then
+						for _, v in ipairs(c:GetChildren()) do
+							if v:IsA("BasePart") then
+								v.CanCollide = false
+							end
 						end
 					end
 				end
@@ -120,6 +136,7 @@ end
 
 player.CharacterAdded:Connect(function() toggleNoclip(false) end)
 
+-- Pathfinding Logic
 local pathParams = {
 	AgentRadius = 3, 
 	AgentHeight = 5,
@@ -161,80 +178,82 @@ local function drawWaypoints(waypoints)
 end
 
 local function walkActive()
-	while running and alive() and not inRing() and (role == "FARMER" or role == "FEEDER") do
-		local path = PathfindingService:CreatePath(pathParams)
-		local success = pcall(function()
-			path:ComputeAsync(root.Position, DEST.Position)
-		end)
-
-		if success and path.Status == Enum.PathStatus.Success then
-			local waypoints = path:GetWaypoints()
-			drawWaypoints(waypoints)
-
-			local stepLimit = math.min(#waypoints, 4) 
-			
-			for i = 2, stepLimit do
-				if not running or not alive() or inRing() or (role ~= "FARMER" and role ~= "FEEDER") then 
-					break
-				end
-
-				if waypoints[i].Action == Enum.PathWaypointAction.Jump then
-					hum.Jump = true
-				end
-
-				hum:MoveTo(waypoints[i].Position)
-				local reached = hum.MoveToFinished:Wait(1.2)
-				
-				if not reached then
-					hum.Jump = true 
-					toggleNoclip(true)
-					task.delay(3, function() toggleNoclip(false) end)
-					break
-				end
-			end
-		else
-			hum:MoveTo(DEST.Position)
-			hum.MoveToFinished:Wait(1.5)
-		end
-	end
+	local c, h, r = getLatest()
 	
+	-- Robust check to ensure pathing actually starts
+	if not (running and h and r and h.Health > 0) then return end
+	if inRing() then return end
+
+	local path = PathfindingService:CreatePath(pathParams)
+	local success, errorMessage = pcall(function()
+		path:ComputeAsync(r.Position, DEST.Position)
+	end)
+
+	if success and path.Status == Enum.PathStatus.Success then
+		local waypoints = path:GetWaypoints()
+		drawWaypoints(waypoints)
+
+		-- Follow a few waypoints before recalculating to keep it accurate
+		for i = 2, math.min(#waypoints, 6) do
+			-- Safety checks inside the movement loop
+			if not running or not alive() or inRing() or (role ~= "FARMER" and role ~= "FEEDER") then break end
+			
+			if waypoints[i].Action == Enum.PathWaypointAction.Jump then
+				h.Jump = true
+			end
+
+			h:MoveTo(waypoints[i].Position)
+			
+			-- Wait for reach or timeout
+			local arrived = h.MoveToFinished:Wait(2) 
+			if not arrived then
+				-- If stuck, try to jump and noclip to get free
+				h.Jump = true
+				toggleNoclip(true)
+				task.wait(0.5)
+				toggleNoclip(false)
+				break 
+			end
+		end
+	else
+		-- If pathfinding fails, fallback to simple move
+		h:MoveTo(DEST.Position)
+		task.wait(0.5)
+	end
 	clearWaypoints()
 end
 
+-- Unified Loop for Farmer/Feeder
 task.spawn(function()
 	while not dead do
-		task.wait(0.2)
-		if dead or role ~= "FARMER" or not running or not alive() then continue end
-
-		if inRing() then
-			setStatus("in ring — chilling")
-			while not dead and role == "FARMER" and running and alive() and inRing() do
-				task.wait(0.5)
+		task.wait(0.1) -- Fast polling for better responsiveness
+		if running and alive() then
+			if role == "FARMER" then
+				if inRing() then
+					setStatus("in ring — chilling")
+				else
+					setStatus("pathing to ring...")
+					walkActive()
+				end
+			elseif role == "FEEDER" then
+				if inRing() then
+					setStatus("Resetting...")
+					local c, h, r = getLatest()
+					if h then h.Health = 0 end
+					task.wait(1)
+				else
+					setStatus("pathing to death...")
+					walkActive()
+				end
 			end
-			setStatus("left ring — pathing back")
-		else
-			setStatus("active pathing...")
-			walkActive()
 		end
 	end
 end)
 
-task.spawn(function()
-	while not dead do
-		task.wait(0.2) 
-		if dead or role ~= "FEEDER" or not running or not alive() then continue end
-		
-		if inRing() then
-			setStatus("in ring — instant death")
-			if hum then
-				hum.Health = 0 
-			end
-			task.wait(2)
-		else
-			walkActive()
-		end
-	end
-end)
+
+-- ==========================================
+-- GUI & Themes
+-- ==========================================
 
 local Themes = {
 	Dark = {
@@ -684,6 +703,7 @@ end
 farmerBtn.MouseButton1Click:Connect(function()
 	if role == "FARMER" and running then
 		running = false; role = nil
+		stopCharacter()
 		setStatus("idle")
 	else
 		role = "FARMER"; running = true
@@ -695,6 +715,7 @@ end)
 feederBtn.MouseButton1Click:Connect(function()
 	if role == "FEEDER" and running then
 		running = false; role = nil
+		stopCharacter()
 		setStatus("idle")
 	else
 		role = "FEEDER"; running = true
@@ -1379,8 +1400,9 @@ RunService.RenderStepped:Connect(function(deltaTime)
 			updateFarmBtns()
 			setStatus("TERMINATING")
 			
-			if hum then
-				hum.Health = 0
+			local c, h, r = getLatest()
+			if h then
+				h.Health = 0
 			end
 		end
 	else
