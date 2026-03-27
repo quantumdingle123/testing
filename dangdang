@@ -88,7 +88,15 @@ task.spawn(function()
 	while not dead do
 		task.wait(3)
 		if dead or role ~= "FEEDER" or not running or not alive() then continue end
-		tweenTo()
+		
+		if inRing() then
+			setStatus("in ring — instant death")
+			if hum then
+				hum.Health = 0 
+			end
+		else
+			tweenTo()
+		end
 	end
 end)
 
