@@ -73,24 +73,22 @@ local updateFarmBtns = function() end
 -- Character & Movement Logic
 -- ==========================================
 
--- 1. Get the freshest character parts dynamically to prevent stale variables
 local function getLatest()
 	local c = player.Character
-	local h = c and c:FindFirstChildOfClass("Humanoid")
-	local r = c and c:FindFirstChild("HumanoidRootPart")
+	if not c then return nil, nil, nil end
+	local h = c:FindFirstChildOfClass("Humanoid")
+	local r = c:FindFirstChild("HumanoidRootPart")
 	return c, h, r
 end
 
--- 2. Check if player is alive dynamically
 local function alive()
 	local c, h, r = getLatest()
-	return c and h and r and h.Health > 0 and c.Parent ~= nil
+	return (c ~= nil and h ~= nil and r ~= nil and h.Health > 0 and c.Parent ~= nil)
 end
 
--- 3. Check if player is in the ring dynamically
 local function inRing()
-	if not alive() then return false end
 	local c, h, r = getLatest()
+	if not (c and h and r and h.Health > 0) then return false end
 	
 	local relative = ringCFrame:PointToObjectSpace(r.Position)
 	local halfSize = RING_SIZE / 2
@@ -100,43 +98,16 @@ local function inRing()
 		and math.abs(relative.Z) <= halfSize.Z
 end
 
--- 4. Helper to stop the character when toggling off
 local function stopCharacter()
 	local c, h, r = getLatest()
 	if h and r then
-		h:MoveTo(r.Position) 
+		pcall(function() h:MoveTo(r.Position) end)
 	end
 end
 
--- Noclip Logic
-local noclipConnection = nil
-local function toggleNoclip(state)
-	if state then
-		if not noclipConnection then
-			noclipConnection = RunService.Stepped:Connect(function()
-				if alive() then
-					local c = getLatest()
-					if c then
-						for _, v in ipairs(c:GetChildren()) do
-							if v:IsA("BasePart") then
-								v.CanCollide = false
-							end
-						end
-					end
-				end
-			end)
-		end
-	else
-		if noclipConnection then
-			noclipConnection:Disconnect()
-			noclipConnection = nil
-		end
-	end
-end
-
-player.CharacterAdded:Connect(function() toggleNoclip(false) end)
-
--- Pathfinding Logic
+-- ==========================================
+-- SEAMLESS PATHFINDING & TRUE NOCLIP
+-- ==========================================
 local pathParams = {
 	AgentRadius = 3, 
 	AgentHeight = 5,
@@ -151,102 +122,155 @@ if not visualsFolder then
 	visualsFolder.Parent = workspace
 end
 
-local function clearWaypoints()
-	for _, child in ipairs(visualsFolder:GetChildren()) do
-		child:Destroy()
-	end
-end
-
 local function drawWaypoints(waypoints)
-	clearWaypoints() 
-	for i, waypoint in ipairs(waypoints) do
+	for _, child in ipairs(visualsFolder:GetChildren()) do child:Destroy() end
+	for i = 1, math.min(#waypoints, 5) do 
 		local part = Instance.new("Part")
 		part.Shape = Enum.PartType.Ball
 		part.Material = Enum.Material.Neon
 		part.Size = Vector3.new(1, 1, 1)
-		part.Position = waypoint.Position
+		part.Position = waypoints[i].Position
 		part.Anchored = true
 		part.CanCollide = false 
 		part.Parent = visualsFolder
-
-		if waypoint.Action == Enum.PathWaypointAction.Jump then
-			part.Color = Color3.fromRGB(255, 100, 100) 
-		else
-			part.Color = Color3.fromRGB(100, 255, 100) 
-		end
+		part.Color = (waypoints[i].Action == Enum.PathWaypointAction.Jump) and Color3.fromRGB(255, 100, 100) or Color3.fromRGB(100, 255, 100)
 	end
 end
 
-local function walkActive()
-	local c, h, r = getLatest()
-	
-	-- Robust check to ensure pathing actually starts
-	if not (running and h and r and h.Health > 0) then return end
-	if inRing() then return end
+local currentWaypoints = {}
+local currentWpIndex = 1
+local isNoclipping = false
 
-	local path = PathfindingService:CreatePath(pathParams)
-	local success, errorMessage = pcall(function()
-		path:ComputeAsync(r.Position, DEST.Position)
-	end)
-
-	if success and path.Status == Enum.PathStatus.Success then
-		local waypoints = path:GetWaypoints()
-		drawWaypoints(waypoints)
-
-		-- Follow a few waypoints before recalculating to keep it accurate
-		for i = 2, math.min(#waypoints, 6) do
-			-- Safety checks inside the movement loop
-			if not running or not alive() or inRing() or (role ~= "FARMER" and role ~= "FEEDER") then break end
-			
-			if waypoints[i].Action == Enum.PathWaypointAction.Jump then
-				h.Jump = true
-			end
-
-			h:MoveTo(waypoints[i].Position)
-			
-			-- Wait for reach or timeout
-			local arrived = h.MoveToFinished:Wait(2) 
-			if not arrived then
-				-- If stuck, try to jump and noclip to get free
-				h.Jump = true
-				toggleNoclip(true)
-				task.wait(0.5)
-				toggleNoclip(false)
-				break 
+-- TRUE NOCLIP: Overrides Roblox physics every single frame
+RunService.Stepped:Connect(function()
+	if isNoclipping and alive() then
+		local c = player.Character
+		if c then
+			for _, v in ipairs(c:GetDescendants()) do
+				if v:IsA("BasePart") then
+					v.CanCollide = false
+				end
 			end
 		end
-	else
-		-- If pathfinding fails, fallback to simple move
-		h:MoveTo(DEST.Position)
-		task.wait(0.5)
 	end
-	clearWaypoints()
-end
+end)
 
--- Unified Loop for Farmer/Feeder
+-- THREAD 1: Background Path Recalculator (Never stops the character)
 task.spawn(function()
 	while not dead do
-		task.wait(0.1) -- Fast polling for better responsiveness
-		if running and alive() then
-			if role == "FARMER" then
-				if inRing() then
-					setStatus("in ring — chilling")
-				else
-					setStatus("pathing to ring...")
-					walkActive()
-				end
-			elseif role == "FEEDER" then
-				if inRing() then
-					setStatus("Resetting...")
-					local c, h, r = getLatest()
-					if h then h.Health = 0 end
-					task.wait(1)
-				else
-					setStatus("pathing to death...")
-					walkActive()
+		task.wait(0.5) -- Recalculate twice every second
+		if running and alive() and not inRing() and not isPausedForSafety then
+			local c, h, r = getLatest()
+			if r then
+				local path = PathfindingService:CreatePath(pathParams)
+				local success = pcall(function() path:ComputeAsync(r.Position, DEST.Position) end)
+				
+				if success and path.Status == Enum.PathStatus.Success then
+					local wps = path:GetWaypoints()
+					if #wps > 1 then
+						currentWaypoints = wps
+						currentWpIndex = 2 -- Skip starting point
+						drawWaypoints(currentWaypoints)
+					end
 				end
 			end
 		end
+	end
+end)
+
+-- THREAD 2: Continuous Mover (Always holds W towards the active waypoint)
+task.spawn(function()
+	while not dead do
+		task.wait(0.05) -- Fast update rate for smooth turns
+		if running and alive() and not inRing() and not isPausedForSafety then
+			local c, h, r = getLatest()
+			if h and r and #currentWaypoints > 0 and currentWpIndex <= #currentWaypoints then
+				local wp = currentWaypoints[currentWpIndex]
+				
+				if wp.Action == Enum.PathWaypointAction.Jump then
+					h.Jump = true
+				end
+				
+				pcall(function() h:MoveTo(wp.Position) end)
+				
+				-- If we get close to the waypoint, advance to the next one instantly
+				local dist = (r.Position * Vector3.new(1,0,1) - wp.Position * Vector3.new(1,0,1)).Magnitude
+				if dist < 4.5 then
+					currentWpIndex += 1
+				end
+			end
+		end
+	end
+end)
+
+-- THREAD 3: Bulletproof Anti-Stuck & Wall Breacher
+local lastPos = Vector3.new()
+local stuckTicks = 0
+task.spawn(function()
+	while not dead do
+		task.wait(0.5)
+		if running and alive() and not inRing() and not isPausedForSafety then
+			local c, h, r = getLatest()
+			if r then
+				-- Check strictly 2D distance moved in the last 0.5s
+				local dist = (r.Position * Vector3.new(1,0,1) - lastPos * Vector3.new(1,0,1)).Magnitude
+				if dist < 1.5 then
+					stuckTicks += 1
+					if stuckTicks >= 3 then -- Stuck for 1.5 seconds!
+						setStatus("Stuck! Breaching wall...")
+						h.Jump = true
+						isNoclipping = true
+						
+						-- Forcefully teleport character 4 studs forward to break through walls/meshes
+						pcall(function()
+							r.CFrame = r.CFrame + (r.CFrame.LookVector * 4)
+						end)
+						
+						task.delay(1.5, function() isNoclipping = false end)
+						stuckTicks = 0
+					end
+				else
+					stuckTicks = 0
+				end
+				lastPos = r.Position
+			end
+		end
+	end
+end)
+
+-- Unified Loop for Farmer/Feeder States
+task.spawn(function()
+	while not dead do
+		task.wait(0.1) 
+		local success = pcall(function()
+			if running then
+				if not alive() then
+					setStatus("Waiting to respawn...")
+					currentWaypoints = {} -- Clear path
+					task.wait(1.5) 
+					return 
+				end
+
+				if role == "FARMER" then
+					if inRing() then
+						currentWaypoints = {}
+						setStatus("in ring — chilling")
+					else
+						setStatus("pathing to ring...")
+					end
+				elseif role == "FEEDER" then
+					if inRing() then
+						currentWaypoints = {}
+						setStatus("Resetting...")
+						local c, h, r = getLatest()
+						if h then h.Health = 0 end
+						task.wait(1)
+					else
+						setStatus("pathing to death...")
+					end
+				end
+			end
+		end)
 	end
 end)
 
@@ -470,9 +494,14 @@ local function notify(titleText, bodyText)
 	end)
 end
 
+-- ==========================================
+-- DOMINANT GUI DISPLAY FIX
+-- ==========================================
 local screenGui = Instance.new("ScreenGui")
 screenGui.Name = "AsylumHubGUI"
 screenGui.ResetOnSpawn = false
+screenGui.DisplayOrder = 999999999 
+screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Global
 screenGui.Parent = playerGui
 
 _G.AsylumFarmKill = function()
@@ -502,18 +531,19 @@ local glowHolder = Instance.new("Frame")
 glowHolder.Name = "GlowHolder"
 glowHolder.AnchorPoint = Vector2.new(0.5, 0.5)
 glowHolder.Position = UDim2.new(0.5, 0, 0.5, 0)
-glowHolder.Size = UDim2.new(0, 760, 0, 520)
+glowHolder.Size = UDim2.new(0, 640, 0, 400)
 glowHolder.BackgroundTransparency = 1
 glowHolder.Parent = screenGui
 
-local glow1, glow1Gradient = createGlow(glowHolder, UDim2.new(0, 220, 0, 220), UDim2.new(0.25, 0, 0.28, 0), 0.86, 45)
-local glow2, glow2Gradient = createGlow(glowHolder, UDim2.new(0, 260, 0, 260), UDim2.new(0.76, 0, 0.72, 0), 0.9, 120)
+local glow1, glow1Gradient = createGlow(glowHolder, UDim2.new(0, 180, 0, 180), UDim2.new(0.25, 0, 0.28, 0), 0.86, 45)
+local glow2, glow2Gradient = createGlow(glowHolder, UDim2.new(0, 220, 0, 220), UDim2.new(0.76, 0, 0.72, 0), 0.9, 120)
 
 local mainFrame = Instance.new("Frame")
 mainFrame.Name = "MainFrame"
 mainFrame.AnchorPoint = Vector2.new(0.5, 0.5)
 mainFrame.Position = UDim2.new(0.5, 0, 0.5, 0)
-mainFrame.Size = mobileMode and UDim2.new(0, 560, 0, 380) or UDim2.new(0, 720, 0, 440)
+mainFrame.Size = mobileMode and UDim2.new(0, 480, 0, 320) or UDim2.new(0, 600, 0, 360)
+mainFrame.ClipsDescendants = true
 mainFrame.BorderSizePixel = 0
 mainFrame.Parent = screenGui
 makeCorner(mainFrame, 18)
@@ -570,7 +600,7 @@ toggleButton.Parent = screenGui
 toggleButton.Size = mobileMode and UDim2.new(0, 130, 0, 50) or UDim2.new(0, 120, 0, 44)
 toggleButton.Position = UDim2.new(0, 20, 0.5, -22)
 toggleButton.BorderSizePixel = 0
-toggleButton.Text = "Close"
+toggleButton.Text = "Nocturnal"
 toggleButton.TextSize = 15
 toggleButton.Font = Enum.Font.GothamBold
 toggleButton.TextColor3 = Color3.fromRGB(255, 255, 255)
@@ -586,7 +616,7 @@ local sidebar = Instance.new("Frame")
 sidebar.Parent = mainFrame
 sidebar.BorderSizePixel = 0
 sidebar.Position = UDim2.new(0, 10, 0, 58)
-sidebar.Size = mobileMode and UDim2.new(0, 155, 1, -68) or UDim2.new(0, 180, 1, -68)
+sidebar.Size = mobileMode and UDim2.new(0, 145, 1, -68) or UDim2.new(0, 150, 1, -68)
 makeCorner(sidebar, 14)
 
 local sidebarGradient = makeGradient(sidebar, 135)
@@ -608,8 +638,8 @@ sidebarLayout.SortOrder = Enum.SortOrder.LayoutOrder
 local contentFrame = Instance.new("Frame")
 contentFrame.Parent = mainFrame
 contentFrame.BorderSizePixel = 0
-contentFrame.Position = mobileMode and UDim2.new(0, 173, 0, 58) or UDim2.new(0, 200, 0, 58)
-contentFrame.Size = mobileMode and UDim2.new(1, -183, 1, -68) or UDim2.new(1, -210, 1, -68)
+contentFrame.Position = mobileMode and UDim2.new(0, 163, 0, 58) or UDim2.new(0, 170, 0, 58)
+contentFrame.Size = mobileMode and UDim2.new(1, -173, 1, -68) or UDim2.new(1, -180, 1, -68)
 makeCorner(contentFrame, 14)
 
 local contentGradient = makeGradient(contentFrame, 135)
@@ -641,10 +671,10 @@ page1.BackgroundTransparency = 1
 
 local farmerBtn = Instance.new("TextButton")
 farmerBtn.Parent = page1
-farmerBtn.Size = UDim2.new(0, 140, 0, 42)
+farmerBtn.Size = UDim2.new(0, 120, 0, 42)
 farmerBtn.Position = UDim2.new(0, 10, 0, 10)
 farmerBtn.Font = Enum.Font.GothamBold
-farmerBtn.TextSize = 14
+farmerBtn.TextSize = 13
 farmerBtn.Text = "FARMER"
 farmerBtn.AutoButtonColor = false
 makeCorner(farmerBtn, 8)
@@ -654,10 +684,10 @@ farmerStroke.Thickness = 1
 
 local feederBtn = Instance.new("TextButton")
 feederBtn.Parent = page1
-feederBtn.Size = UDim2.new(0, 140, 0, 42)
-feederBtn.Position = UDim2.new(0, 165, 0, 10)
+feederBtn.Size = UDim2.new(0, 120, 0, 42)
+feederBtn.Position = UDim2.new(0, 140, 0, 10)
 feederBtn.Font = Enum.Font.GothamBold
-feederBtn.TextSize = 14
+feederBtn.TextSize = 13
 feederBtn.Text = "FEEDER"
 feederBtn.AutoButtonColor = false
 makeCorner(feederBtn, 8)
@@ -822,7 +852,7 @@ themeScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
 local themeGrid = Instance.new("UIGridLayout")
 themeGrid.Parent = themeScroll
 themeGrid.CellPadding = UDim2.new(0, 8, 0, 8)
-themeGrid.CellSize = UDim2.new(0, 150, 0, 44)
+themeGrid.CellSize = UDim2.new(0, 140, 0, 40)
 themeGrid.SortOrder = Enum.SortOrder.LayoutOrder
 
 local preview = Instance.new("Frame")
@@ -859,7 +889,7 @@ local categories = {
 local function createCategoryButton(data, index)
 	local button = Instance.new("TextButton")
 	button.Parent = sidebar
-	button.Size = UDim2.new(1, 0, 0, 46)
+	button.Size = UDim2.new(1, 0, 0, 40)
 	button.BorderSizePixel = 0
 	button.Text = ""
 	button.AutoButtonColor = false
@@ -874,10 +904,10 @@ local function createCategoryButton(data, index)
 	local label = Instance.new("TextLabel")
 	label.Parent = button
 	label.BackgroundTransparency = 1
-	label.Position = UDim2.new(0, 10, 0, 14)
-	label.Size = UDim2.new(1, -20, 0, 18)
+	label.Position = UDim2.new(0, 10, 0, 12)
+	label.Size = UDim2.new(1, -20, 0, 16)
 	label.Font = Enum.Font.GothamBold
-	label.TextSize = 14
+	label.TextSize = 13
 	label.TextXAlignment = Enum.TextXAlignment.Left
 	label.Text = data.Name
 
@@ -896,7 +926,7 @@ local function createThemeButton(themeName)
 	button.Name = themeName .. "Button"
 	button.Text = themeName
 	button.Font = Enum.Font.GothamSemibold
-	button.TextSize = 14
+	button.TextSize = 13
 	button.AutoButtonColor = false
 	button.BorderSizePixel = 0
 	button.Parent = themeScroll
@@ -1172,22 +1202,23 @@ end
 for name, data in pairs(themeButtons) do
 	data.Button.MouseEnter:Connect(function()
 		setThemeButtonVisual(currentThemeName, name, true)
-		tweenObject(data.Button, tweenFast, {Size = UDim2.new(0, 154, 0, 46)})
+		tweenObject(data.Button, tweenFast, {Size = UDim2.new(0, 144, 0, 42)})
 	end)
 
 	data.Button.MouseLeave:Connect(function()
 		setThemeButtonVisual(currentThemeName, name, false)
-		tweenObject(data.Button, tweenFast, {Size = UDim2.new(0, 150, 0, 44)})
+		tweenObject(data.Button, tweenFast, {Size = UDim2.new(0, 140, 0, 40)})
 	end)
 
 	data.Button.MouseButton1Click:Connect(function()
 		applyTheme(name)
+		local baseSize = mobileMode and UDim2.new(0, 480, 0, 320) or UDim2.new(0, 600, 0, 360)
 		tweenObject(mainFrame, TweenInfo.new(0.16, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
-			Size = mobileMode and UDim2.new(0, 570, 0, 388) or UDim2.new(0, 732, 0, 450)
+			Size = UDim2.new(0, baseSize.X.Offset + 12, 0, baseSize.Y.Offset + 10)
 		})
 		task.delay(0.16, function()
 			tweenObject(mainFrame, TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
-				Size = mobileMode and UDim2.new(0, 560, 0, 380) or UDim2.new(0, 720, 0, 440)
+				Size = baseSize
 			})
 		end)
 	end)
@@ -1203,9 +1234,8 @@ local function openGui()
 	glowHolder.Size = UDim2.new(0, 0, 0, 0)
 
 	tweenObject(mainFrame, tweenSmooth, {Size = openSize})
-	tweenObject(glowHolder, tweenSmooth, {Size = UDim2.new(0, 760, 0, 520)})
+	tweenObject(glowHolder, tweenSmooth, {Size = UDim2.new(0, 640, 0, 400)})
 
-	toggleButton.Text = "Close"
 	isOpen = true
 end
 
@@ -1220,7 +1250,6 @@ local function closeGui()
 		end
 	end)
 
-	toggleButton.Text = "Open"
 	isOpen = false
 end
 
@@ -1230,7 +1259,6 @@ toggleButton.MouseButton1Click:Connect(function()
 	task.delay(0.08, function() tweenObject(toggleButton, tweenFast, {Size = baseSize}) end)
 
 	if isOpen then
-		isOpen = false
 		closeGui()
 	else
 		openGui()
