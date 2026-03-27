@@ -11,27 +11,19 @@ local PathfindingService = game:GetService("PathfindingService")
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
 
---=========================================
--- ANTI-IDLE (ANTI-AFK) LOGIC
---=========================================
 player.Idled:Connect(function()
-    VirtualUser:CaptureController()
-    VirtualUser:ClickButton2(Vector2.new())
+	VirtualUser:CaptureController()
+	VirtualUser:ClickButton2(Vector2.new())
 end)
 
---=========================================
--- ASYLUM FARM CORE LOGIC
---=========================================
-local BOTS  = { PearTeto_Real = true, IamtotallynotPearman = true }
-local DEST  = CFrame.new(-10.160541534423828, 255.27276611328125, -611.555908203125)
+local BOTS = { PearTeto_Real = true, IamtotallynotPearman = true }
+local DEST = CFrame.new(-10.160541534423828, 255.27276611328125, -611.555908203125)
 
--- ✅ 3D RING/ZONE SETTINGS
 local RING_POSITION = Vector3.new(-19.12, 256.01, -595.00)
 local RING_SIZE = Vector3.new(26, 12, 26)
-local RING_ROTATION_Y = -30 -- degrees
+local RING_ROTATION_Y = -30
 local ringCFrame = CFrame.new(RING_POSITION) * CFrame.Angles(0, math.rad(RING_ROTATION_Y), 0)
 
--- Create the INVISIBLE Box in Workspace
 local ringVisualsFolder = workspace:FindFirstChild("RingVisuals")
 if not ringVisualsFolder then
 	ringVisualsFolder = Instance.new("Folder")
@@ -46,13 +38,13 @@ if not ringVisualsFolder then
 	boxPart.CanCollide = false
 	boxPart.CanTouch = false
 	boxPart.CanQuery = false
-	boxPart.Transparency = 1 -- Invisible
+	boxPart.Transparency = 1
 	boxPart.Parent = ringVisualsFolder
 
 	local selectionBox = Instance.new("SelectionBox")
 	selectionBox.Adornee = boxPart
 	selectionBox.LineThickness = 0
-	selectionBox.Transparency = 1 -- Invisible
+	selectionBox.Transparency = 1
 	selectionBox.Parent = boxPart
 
 	local centerMarker = Instance.new("Part")
@@ -61,12 +53,12 @@ if not ringVisualsFolder then
 	centerMarker.CFrame = CFrame.new(RING_POSITION)
 	centerMarker.Anchored = true
 	centerMarker.CanCollide = false
-	centerMarker.Transparency = 1 -- Invisible
+	centerMarker.Transparency = 1
 	centerMarker.Parent = ringVisualsFolder
 end
 
-local dead    = false
-local role    = nil
+local dead = false
+local role = nil
 local running = false
 local isPausedForSafety = false
 local savedRole = nil
@@ -78,7 +70,7 @@ local char, hum, root
 
 local function refreshChar()
 	char = player.Character or player.CharacterAdded:Wait()
-	hum  = char:WaitForChild("Humanoid")
+	hum = char:WaitForChild("Humanoid")
 	root = char:WaitForChild("HumanoidRootPart")
 end
 
@@ -92,7 +84,6 @@ player.CharacterAdded:Connect(function()
 	refreshChar()
 end)
 
--- ✅ CHECK IF IN 3D BOX
 local function inRing()
 	if not alive() then return false end
 	
@@ -104,9 +95,6 @@ local function inRing()
 		and math.abs(relative.Z) <= halfSize.Z
 end
 
---=========================================
--- NOCLIP LOGIC
---=========================================
 local noclipConnection = nil
 
 local function toggleNoclip(state)
@@ -130,12 +118,8 @@ local function toggleNoclip(state)
 	end
 end
 
--- Disable noclip naturally when respawning
 player.CharacterAdded:Connect(function() toggleNoclip(false) end)
 
---=========================================
--- PATHFINDING & VISUALS LOGIC
---=========================================
 local pathParams = {
 	AgentRadius = 3, 
 	AgentHeight = 5,
@@ -176,12 +160,10 @@ local function drawWaypoints(waypoints)
 	end
 end
 
--- ✅ "ACTIVE ACTIVE" RECALCULATING PATHING
 local function walkActive()
-	-- Stay inside this active loop while we need to walk
 	while running and alive() and not inRing() and (role == "FARMER" or role == "FEEDER") do
 		local path = PathfindingService:CreatePath(pathParams)
-		local success, errorMessage = pcall(function()
+		local success = pcall(function()
 			path:ComputeAsync(root.Position, DEST.Position)
 		end)
 
@@ -189,12 +171,11 @@ local function walkActive()
 			local waypoints = path:GetWaypoints()
 			drawWaypoints(waypoints)
 
-			-- MAGIC TRICK: Only walk exactly 3 waypoints forward, then break to recalculate
 			local stepLimit = math.min(#waypoints, 4) 
 			
 			for i = 2, stepLimit do
 				if not running or not alive() or inRing() or (role ~= "FARMER" and role ~= "FEEDER") then 
-					break -- Break the loop instantly
+					break
 				end
 
 				if waypoints[i].Action == Enum.PathWaypointAction.Jump then
@@ -202,24 +183,16 @@ local function walkActive()
 				end
 
 				hum:MoveTo(waypoints[i].Position)
-				
-				-- Short 1.2s timeout to make it hyper-responsive to being stuck
 				local reached = hum.MoveToFinished:Wait(1.2)
 				
 				if not reached then
-					-- Stuck or User Overrode Controls: Instantly trigger Noclip, Jump, and Recalculate!
 					hum.Jump = true 
 					toggleNoclip(true)
-					
-					task.delay(3, function() 
-						toggleNoclip(false) 
-					end)
-					
-					break -- Force outer while-loop to recalculate instantly
+					task.delay(3, function() toggleNoclip(false) end)
+					break
 				end
 			end
 		else
-			-- If pathing fails to compute, blindly step towards destination
 			hum:MoveTo(DEST.Position)
 			hum.MoveToFinished:Wait(1.5)
 		end
@@ -228,7 +201,6 @@ local function walkActive()
 	clearWaypoints()
 end
 
--- The Farming Loop
 task.spawn(function()
 	while not dead do
 		task.wait(0.2)
@@ -242,7 +214,7 @@ task.spawn(function()
 			setStatus("left ring — pathing back")
 		else
 			setStatus("active pathing...")
-			walkActive() -- Calls the new Active Real-time Pathing loop
+			walkActive()
 		end
 	end
 end)
@@ -257,192 +229,69 @@ task.spawn(function()
 			if hum then
 				hum.Health = 0 
 			end
-			task.wait(2) -- Tiny buffer so it doesn't spam kill while the screen turns gray
+			task.wait(2)
 		else
 			walkActive()
 		end
 	end
 end)
 
-
---=========================================
--- HUB GUI LOGIC & THEMES
---=========================================
 local Themes = {
 	Dark = {
-		Main = ColorSequence.new{
-			ColorSequenceKeypoint.new(0, Color3.fromRGB(18, 18, 24)),
-			ColorSequenceKeypoint.new(0.5, Color3.fromRGB(28, 28, 36)),
-			ColorSequenceKeypoint.new(1, Color3.fromRGB(38, 38, 48))
-		},
-		Topbar = ColorSequence.new{
-			ColorSequenceKeypoint.new(0, Color3.fromRGB(24, 24, 32)),
-			ColorSequenceKeypoint.new(1, Color3.fromRGB(40, 40, 52))
-		},
-		Button = ColorSequence.new{
-			ColorSequenceKeypoint.new(0, Color3.fromRGB(42, 42, 56)),
-			ColorSequenceKeypoint.new(1, Color3.fromRGB(58, 58, 74))
-		},
-		ButtonHover = ColorSequence.new{
-			ColorSequenceKeypoint.new(0, Color3.fromRGB(60, 60, 78)),
-			ColorSequenceKeypoint.new(1, Color3.fromRGB(84, 84, 104))
-		},
-		Accent = Color3.fromRGB(120, 125, 145),
-		Accent2 = Color3.fromRGB(170, 175, 195),
-		Text = Color3.fromRGB(240, 240, 245),
-		SubText = Color3.fromRGB(180, 180, 195),
-		Stroke = Color3.fromRGB(85, 85, 105),
-		Glow = Color3.fromRGB(130, 135, 160)
+		Main = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(18, 18, 24)), ColorSequenceKeypoint.new(0.5, Color3.fromRGB(28, 28, 36)), ColorSequenceKeypoint.new(1, Color3.fromRGB(38, 38, 48))},
+		Topbar = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(24, 24, 32)), ColorSequenceKeypoint.new(1, Color3.fromRGB(40, 40, 52))},
+		Button = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(42, 42, 56)), ColorSequenceKeypoint.new(1, Color3.fromRGB(58, 58, 74))},
+		ButtonHover = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(60, 60, 78)), ColorSequenceKeypoint.new(1, Color3.fromRGB(84, 84, 104))},
+		Accent = Color3.fromRGB(120, 125, 145), Accent2 = Color3.fromRGB(170, 175, 195),
+		Text = Color3.fromRGB(240, 240, 245), SubText = Color3.fromRGB(180, 180, 195), Stroke = Color3.fromRGB(85, 85, 105), Glow = Color3.fromRGB(130, 135, 160)
 	},
 	Red = {
-		Main = ColorSequence.new{
-			ColorSequenceKeypoint.new(0, Color3.fromRGB(36, 12, 18)),
-			ColorSequenceKeypoint.new(0.5, Color3.fromRGB(54, 18, 26)),
-			ColorSequenceKeypoint.new(1, Color3.fromRGB(78, 28, 38))
-		},
-		Topbar = ColorSequence.new{
-			ColorSequenceKeypoint.new(0, Color3.fromRGB(50, 15, 24)),
-			ColorSequenceKeypoint.new(1, Color3.fromRGB(86, 28, 40))
-		},
-		Button = ColorSequence.new{
-			ColorSequenceKeypoint.new(0, Color3.fromRGB(94, 32, 44)),
-			ColorSequenceKeypoint.new(1, Color3.fromRGB(128, 44, 58))
-		},
-		ButtonHover = ColorSequence.new{
-			ColorSequenceKeypoint.new(0, Color3.fromRGB(122, 42, 56)),
-			ColorSequenceKeypoint.new(1, Color3.fromRGB(168, 58, 74))
-		},
-		Accent = Color3.fromRGB(220, 78, 98),
-		Accent2 = Color3.fromRGB(255, 130, 145),
-		Text = Color3.fromRGB(255, 238, 240),
-		SubText = Color3.fromRGB(232, 185, 192),
-		Stroke = Color3.fromRGB(160, 68, 82),
-		Glow = Color3.fromRGB(255, 95, 115)
+		Main = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(36, 12, 18)), ColorSequenceKeypoint.new(0.5, Color3.fromRGB(54, 18, 26)), ColorSequenceKeypoint.new(1, Color3.fromRGB(78, 28, 38))},
+		Topbar = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(50, 15, 24)), ColorSequenceKeypoint.new(1, Color3.fromRGB(86, 28, 40))},
+		Button = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(94, 32, 44)), ColorSequenceKeypoint.new(1, Color3.fromRGB(128, 44, 58))},
+		ButtonHover = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(122, 42, 56)), ColorSequenceKeypoint.new(1, Color3.fromRGB(168, 58, 74))},
+		Accent = Color3.fromRGB(220, 78, 98), Accent2 = Color3.fromRGB(255, 130, 145),
+		Text = Color3.fromRGB(255, 238, 240), SubText = Color3.fromRGB(232, 185, 192), Stroke = Color3.fromRGB(160, 68, 82), Glow = Color3.fromRGB(255, 95, 115)
 	},
 	Sapphire = {
-		Main = ColorSequence.new{
-			ColorSequenceKeypoint.new(0, Color3.fromRGB(10, 24, 50)),
-			ColorSequenceKeypoint.new(0.5, Color3.fromRGB(18, 40, 78)),
-			ColorSequenceKeypoint.new(1, Color3.fromRGB(28, 58, 108))
-		},
-		Topbar = ColorSequence.new{
-			ColorSequenceKeypoint.new(0, Color3.fromRGB(18, 36, 70)),
-			ColorSequenceKeypoint.new(1, Color3.fromRGB(34, 62, 110))
-		},
-		Button = ColorSequence.new{
-			ColorSequenceKeypoint.new(0, Color3.fromRGB(42, 78, 132)),
-			ColorSequenceKeypoint.new(1, Color3.fromRGB(58, 102, 166))
-		},
-		ButtonHover = ColorSequence.new{
-			ColorSequenceKeypoint.new(0, Color3.fromRGB(60, 110, 176)),
-			ColorSequenceKeypoint.new(1, Color3.fromRGB(86, 142, 215))
-		},
-		Accent = Color3.fromRGB(92, 170, 255),
-		Accent2 = Color3.fromRGB(160, 215, 255),
-		Text = Color3.fromRGB(240, 248, 255),
-		SubText = Color3.fromRGB(180, 210, 235),
-		Stroke = Color3.fromRGB(88, 132, 185),
-		Glow = Color3.fromRGB(96, 180, 255)
+		Main = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(10, 24, 50)), ColorSequenceKeypoint.new(0.5, Color3.fromRGB(18, 40, 78)), ColorSequenceKeypoint.new(1, Color3.fromRGB(28, 58, 108))},
+		Topbar = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(18, 36, 70)), ColorSequenceKeypoint.new(1, Color3.fromRGB(34, 62, 110))},
+		Button = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(42, 78, 132)), ColorSequenceKeypoint.new(1, Color3.fromRGB(58, 102, 166))},
+		ButtonHover = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(60, 110, 176)), ColorSequenceKeypoint.new(1, Color3.fromRGB(86, 142, 215))},
+		Accent = Color3.fromRGB(92, 170, 255), Accent2 = Color3.fromRGB(160, 215, 255),
+		Text = Color3.fromRGB(240, 248, 255), SubText = Color3.fromRGB(180, 210, 235), Stroke = Color3.fromRGB(88, 132, 185), Glow = Color3.fromRGB(96, 180, 255)
 	},
 	Emerald = {
-		Main = ColorSequence.new{
-			ColorSequenceKeypoint.new(0, Color3.fromRGB(10, 32, 24)),
-			ColorSequenceKeypoint.new(0.5, Color3.fromRGB(18, 52, 38)),
-			ColorSequenceKeypoint.new(1, Color3.fromRGB(26, 76, 54))
-		},
-		Topbar = ColorSequence.new{
-			ColorSequenceKeypoint.new(0, Color3.fromRGB(16, 46, 34)),
-			ColorSequenceKeypoint.new(1, Color3.fromRGB(28, 72, 52))
-		},
-		Button = ColorSequence.new{
-			ColorSequenceKeypoint.new(0, Color3.fromRGB(34, 92, 66)),
-			ColorSequenceKeypoint.new(1, Color3.fromRGB(50, 124, 88))
-		},
-		ButtonHover = ColorSequence.new{
-			ColorSequenceKeypoint.new(0, Color3.fromRGB(58, 136, 98)),
-			ColorSequenceKeypoint.new(1, Color3.fromRGB(78, 170, 125))
-		},
-		Accent = Color3.fromRGB(86, 220, 156),
-		Accent2 = Color3.fromRGB(152, 255, 204),
-		Text = Color3.fromRGB(236, 255, 245),
-		SubText = Color3.fromRGB(176, 220, 196),
-		Stroke = Color3.fromRGB(72, 150, 112),
-		Glow = Color3.fromRGB(100, 255, 180)
+		Main = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(10, 32, 24)), ColorSequenceKeypoint.new(0.5, Color3.fromRGB(18, 52, 38)), ColorSequenceKeypoint.new(1, Color3.fromRGB(26, 76, 54))},
+		Topbar = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(16, 46, 34)), ColorSequenceKeypoint.new(1, Color3.fromRGB(28, 72, 52))},
+		Button = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(34, 92, 66)), ColorSequenceKeypoint.new(1, Color3.fromRGB(50, 124, 88))},
+		ButtonHover = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(58, 136, 98)), ColorSequenceKeypoint.new(1, Color3.fromRGB(78, 170, 125))},
+		Accent = Color3.fromRGB(86, 220, 156), Accent2 = Color3.fromRGB(152, 255, 204),
+		Text = Color3.fromRGB(236, 255, 245), SubText = Color3.fromRGB(176, 220, 196), Stroke = Color3.fromRGB(72, 150, 112), Glow = Color3.fromRGB(100, 255, 180)
 	},
 	Amethyst = {
-		Main = ColorSequence.new{
-			ColorSequenceKeypoint.new(0, Color3.fromRGB(28, 14, 42)),
-			ColorSequenceKeypoint.new(0.5, Color3.fromRGB(44, 24, 66)),
-			ColorSequenceKeypoint.new(1, Color3.fromRGB(62, 34, 94))
-		},
-		Topbar = ColorSequence.new{
-			ColorSequenceKeypoint.new(0, Color3.fromRGB(42, 20, 62)),
-			ColorSequenceKeypoint.new(1, Color3.fromRGB(68, 32, 98))
-		},
-		Button = ColorSequence.new{
-			ColorSequenceKeypoint.new(0, Color3.fromRGB(82, 42, 120)),
-			ColorSequenceKeypoint.new(1, Color3.fromRGB(108, 58, 154))
-		},
-		ButtonHover = ColorSequence.new{
-			ColorSequenceKeypoint.new(0, Color3.fromRGB(122, 72, 176)),
-			ColorSequenceKeypoint.new(1, Color3.fromRGB(152, 102, 212))
-		},
-		Accent = Color3.fromRGB(190, 110, 255),
-		Accent2 = Color3.fromRGB(225, 180, 255),
-		Text = Color3.fromRGB(249, 242, 255),
-		SubText = Color3.fromRGB(212, 188, 230),
-		Stroke = Color3.fromRGB(134, 92, 180),
-		Glow = Color3.fromRGB(205, 120, 255)
+		Main = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(28, 14, 42)), ColorSequenceKeypoint.new(0.5, Color3.fromRGB(44, 24, 66)), ColorSequenceKeypoint.new(1, Color3.fromRGB(62, 34, 94))},
+		Topbar = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(42, 20, 62)), ColorSequenceKeypoint.new(1, Color3.fromRGB(68, 32, 98))},
+		Button = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(82, 42, 120)), ColorSequenceKeypoint.new(1, Color3.fromRGB(108, 58, 154))},
+		ButtonHover = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(122, 72, 176)), ColorSequenceKeypoint.new(1, Color3.fromRGB(152, 102, 212))},
+		Accent = Color3.fromRGB(190, 110, 255), Accent2 = Color3.fromRGB(225, 180, 255),
+		Text = Color3.fromRGB(249, 242, 255), SubText = Color3.fromRGB(212, 188, 230), Stroke = Color3.fromRGB(134, 92, 180), Glow = Color3.fromRGB(205, 120, 255)
 	},
 	Gold = {
-		Main = ColorSequence.new{
-			ColorSequenceKeypoint.new(0, Color3.fromRGB(44, 30, 10)),
-			ColorSequenceKeypoint.new(0.5, Color3.fromRGB(66, 46, 16)),
-			ColorSequenceKeypoint.new(1, Color3.fromRGB(92, 68, 24))
-		},
-		Topbar = ColorSequence.new{
-			ColorSequenceKeypoint.new(0, Color3.fromRGB(68, 46, 14)),
-			ColorSequenceKeypoint.new(1, Color3.fromRGB(110, 78, 26))
-		},
-		Button = ColorSequence.new{
-			ColorSequenceKeypoint.new(0, Color3.fromRGB(132, 96, 32)),
-			ColorSequenceKeypoint.new(1, Color3.fromRGB(170, 126, 44))
-		},
-		ButtonHover = ColorSequence.new{
-			ColorSequenceKeypoint.new(0, Color3.fromRGB(182, 140, 52)),
-			ColorSequenceKeypoint.new(1, Color3.fromRGB(224, 178, 74))
-		},
-		Accent = Color3.fromRGB(255, 204, 82),
-		Accent2 = Color3.fromRGB(255, 232, 145),
-		Text = Color3.fromRGB(255, 248, 232),
-		SubText = Color3.fromRGB(228, 210, 170),
-		Stroke = Color3.fromRGB(190, 148, 62),
-		Glow = Color3.fromRGB(255, 214, 92)
+		Main = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(44, 30, 10)), ColorSequenceKeypoint.new(0.5, Color3.fromRGB(66, 46, 16)), ColorSequenceKeypoint.new(1, Color3.fromRGB(92, 68, 24))},
+		Topbar = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(68, 46, 14)), ColorSequenceKeypoint.new(1, Color3.fromRGB(110, 78, 26))},
+		Button = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(132, 96, 32)), ColorSequenceKeypoint.new(1, Color3.fromRGB(170, 126, 44))},
+		ButtonHover = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(182, 140, 52)), ColorSequenceKeypoint.new(1, Color3.fromRGB(224, 178, 74))},
+		Accent = Color3.fromRGB(255, 204, 82), Accent2 = Color3.fromRGB(255, 232, 145),
+		Text = Color3.fromRGB(255, 248, 232), SubText = Color3.fromRGB(228, 210, 170), Stroke = Color3.fromRGB(190, 148, 62), Glow = Color3.fromRGB(255, 214, 92)
 	},
 	Rose = {
-		Main = ColorSequence.new{
-			ColorSequenceKeypoint.new(0, Color3.fromRGB(46, 18, 28)),
-			ColorSequenceKeypoint.new(0.5, Color3.fromRGB(70, 28, 44)),
-			ColorSequenceKeypoint.new(1, Color3.fromRGB(100, 42, 62))
-		},
-		Topbar = ColorSequence.new{
-			ColorSequenceKeypoint.new(0, Color3.fromRGB(62, 24, 38)),
-			ColorSequenceKeypoint.new(1, Color3.fromRGB(98, 40, 58))
-		},
-		Button = ColorSequence.new{
-			ColorSequenceKeypoint.new(0, Color3.fromRGB(120, 52, 76)),
-			ColorSequenceKeypoint.new(1, Color3.fromRGB(162, 70, 104))
-		},
-		ButtonHover = ColorSequence.new{
-			ColorSequenceKeypoint.new(0, Color3.fromRGB(186, 90, 124)),
-			ColorSequenceKeypoint.new(1, Color3.fromRGB(224, 118, 154))
-		},
-		Accent = Color3.fromRGB(255, 126, 170),
-		Accent2 = Color3.fromRGB(255, 188, 212),
-		Text = Color3.fromRGB(255, 242, 247),
-		SubText = Color3.fromRGB(234, 190, 205),
-		Stroke = Color3.fromRGB(190, 96, 132),
-		Glow = Color3.fromRGB(255, 135, 180)
+		Main = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(46, 18, 28)), ColorSequenceKeypoint.new(0.5, Color3.fromRGB(70, 28, 44)), ColorSequenceKeypoint.new(1, Color3.fromRGB(100, 42, 62))},
+		Topbar = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(62, 24, 38)), ColorSequenceKeypoint.new(1, Color3.fromRGB(98, 40, 58))},
+		Button = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(120, 52, 76)), ColorSequenceKeypoint.new(1, Color3.fromRGB(162, 70, 104))},
+		ButtonHover = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(186, 90, 124)), ColorSequenceKeypoint.new(1, Color3.fromRGB(224, 118, 154))},
+		Accent = Color3.fromRGB(255, 126, 170), Accent2 = Color3.fromRGB(255, 188, 212),
+		Text = Color3.fromRGB(255, 242, 247), SubText = Color3.fromRGB(234, 190, 205), Stroke = Color3.fromRGB(190, 96, 132), Glow = Color3.fromRGB(255, 135, 180)
 	}
 }
 
@@ -465,7 +314,6 @@ local detectionEnabled = true
 local detectedPlayers = {}
 local lastCheck = 0
 local detectionPosition = DETECTION_CFRAME.Position
-
 local notificationHolder
 
 local function tweenObject(obj, info, props)
@@ -576,47 +424,20 @@ local function notify(titleText, bodyText)
 		Body = notifBody
 	})
 
-	tweenObject(notif, TweenInfo.new(0.28, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {
-		Size = UDim2.new(1, 0, 0, 62),
-		BackgroundTransparency = 0
-	})
-
-	tweenObject(notifStroke, TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
-		Transparency = 0
-	})
-
-	tweenObject(accentBar, TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
-		BackgroundTransparency = 0
-	})
-
-	tweenObject(notifTitle, TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
-		TextTransparency = 0
-	})
-
-	tweenObject(notifBody, TweenInfo.new(0.28, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
-		TextTransparency = 0
-	})
+	tweenObject(notif, TweenInfo.new(0.28, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {Size = UDim2.new(1, 0, 0, 62), BackgroundTransparency = 0})
+	tweenObject(notifStroke, TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Transparency = 0})
+	tweenObject(accentBar, TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {BackgroundTransparency = 0})
+	tweenObject(notifTitle, TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {TextTransparency = 0})
+	tweenObject(notifBody, TweenInfo.new(0.28, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {TextTransparency = 0})
 
 	task.delay(2.4, function()
 		if notif and notif.Parent then
-			tweenObject(notifTitle, TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
-				TextTransparency = 1
-			})
-			tweenObject(notifBody, TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
-				TextTransparency = 1
-			})
-			tweenObject(notifStroke, TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
-				Transparency = 1
-			})
-			tweenObject(accentBar, TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
-				BackgroundTransparency = 1
-			})
+			tweenObject(notifTitle, TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {TextTransparency = 1})
+			tweenObject(notifBody, TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {TextTransparency = 1})
+			tweenObject(notifStroke, TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {Transparency = 1})
+			tweenObject(accentBar, TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {BackgroundTransparency = 1})
 
-			local closeTween = tweenObject(notif, TweenInfo.new(0.24, Enum.EasingStyle.Quart, Enum.EasingDirection.In), {
-				Size = UDim2.new(1, 0, 0, 0),
-				BackgroundTransparency = 1
-			})
-
+			local closeTween = tweenObject(notif, TweenInfo.new(0.24, Enum.EasingStyle.Quart, Enum.EasingDirection.In), {Size = UDim2.new(1, 0, 0, 0), BackgroundTransparency = 1})
 			closeTween.Completed:Connect(function()
 				for i, data in ipairs(activeNotifications) do
 					if data.Frame == notif then
@@ -636,9 +457,9 @@ screenGui.ResetOnSpawn = false
 screenGui.Parent = playerGui
 
 _G.AsylumFarmKill = function()
-	dead    = true
+	dead = true
 	running = false
-	role    = nil
+	role = nil
 	if screenGui and screenGui.Parent then screenGui:Destroy() end
 	_G.AsylumFarmKill = nil
 end
@@ -666,21 +487,8 @@ glowHolder.Size = UDim2.new(0, 760, 0, 520)
 glowHolder.BackgroundTransparency = 1
 glowHolder.Parent = screenGui
 
-local glow1, glow1Gradient = createGlow(
-	glowHolder,
-	UDim2.new(0, 220, 0, 220),
-	UDim2.new(0.25, 0, 0.28, 0),
-	0.86,
-	45
-)
-
-local glow2, glow2Gradient = createGlow(
-	glowHolder,
-	UDim2.new(0, 260, 0, 260),
-	UDim2.new(0.76, 0, 0.72, 0),
-	0.9,
-	120
-)
+local glow1, glow1Gradient = createGlow(glowHolder, UDim2.new(0, 220, 0, 220), UDim2.new(0.25, 0, 0.28, 0), 0.86, 45)
+local glow2, glow2Gradient = createGlow(glowHolder, UDim2.new(0, 260, 0, 260), UDim2.new(0.76, 0, 0.72, 0), 0.9, 120)
 
 local mainFrame = Instance.new("Frame")
 mainFrame.Name = "MainFrame"
@@ -730,22 +538,12 @@ local topGradient = makeGradient(titleBar, 0)
 local title = Instance.new("TextLabel")
 title.Parent = titleBar
 title.BackgroundTransparency = 1
-title.Position = UDim2.new(0, 14, 0, 5)
+title.Position = UDim2.new(0, 14, 0, 13)
 title.Size = UDim2.new(1, -120, 0, 22)
 title.Font = Enum.Font.GothamBold
 title.TextSize = 18
 title.TextXAlignment = Enum.TextXAlignment.Left
-title.Text = "Asylum Hub"
-
-local subtitle = Instance.new("TextLabel")
-subtitle.Parent = titleBar
-subtitle.BackgroundTransparency = 1
-subtitle.Position = UDim2.new(0, 14, 0, 26)
-subtitle.Size = UDim2.new(1, -120, 0, 16)
-subtitle.Font = Enum.Font.Gotham
-subtitle.TextSize = 12
-subtitle.TextXAlignment = Enum.TextXAlignment.Left
-subtitle.Text = "Whitelist, detection, and farming"
+title.Text = "Nocturnal Hub"
 
 local toggleButton = Instance.new("TextButton")
 toggleButton.Name = "ToggleButton"
@@ -761,7 +559,6 @@ toggleButton.AutoButtonColor = false
 makeCorner(toggleButton, 12)
 
 local toggleGradient = makeGradient(toggleButton, 135)
-
 local toggleStroke = Instance.new("UIStroke")
 toggleStroke.Thickness = 1.1
 toggleStroke.Parent = toggleButton
@@ -774,7 +571,6 @@ sidebar.Size = mobileMode and UDim2.new(0, 155, 1, -68) or UDim2.new(0, 180, 1, 
 makeCorner(sidebar, 14)
 
 local sidebarGradient = makeGradient(sidebar, 135)
-
 local sidebarStroke = Instance.new("UIStroke")
 sidebarStroke.Thickness = 1
 sidebarStroke.Parent = sidebar
@@ -798,7 +594,6 @@ contentFrame.Size = mobileMode and UDim2.new(1, -183, 1, -68) or UDim2.new(1, -2
 makeCorner(contentFrame, 14)
 
 local contentGradient = makeGradient(contentFrame, 135)
-
 local contentStroke = Instance.new("UIStroke")
 contentStroke.Thickness = 1
 contentStroke.Parent = contentFrame
@@ -806,22 +601,12 @@ contentStroke.Parent = contentFrame
 local pageTitle = Instance.new("TextLabel")
 pageTitle.Parent = contentFrame
 pageTitle.BackgroundTransparency = 1
-pageTitle.Position = UDim2.new(0, 14, 0, 12)
+pageTitle.Position = UDim2.new(0, 14, 0, 19)
 pageTitle.Size = UDim2.new(1, -28, 0, 26)
 pageTitle.Font = Enum.Font.GothamBold
 pageTitle.TextSize = 17
 pageTitle.TextXAlignment = Enum.TextXAlignment.Left
-pageTitle.Text = "Placeholder"
-
-local pageSubtitle = Instance.new("TextLabel")
-pageSubtitle.Parent = contentFrame
-pageSubtitle.BackgroundTransparency = 1
-pageSubtitle.Position = UDim2.new(0, 14, 0, 38)
-pageSubtitle.Size = UDim2.new(1, -28, 0, 16)
-pageSubtitle.Font = Enum.Font.Gotham
-pageSubtitle.TextSize = 12
-pageSubtitle.TextXAlignment = Enum.TextXAlignment.Left
-pageSubtitle.Text = "Category content"
+pageTitle.Text = ""
 
 local pagesHolder = Instance.new("Frame")
 pagesHolder.Parent = contentFrame
@@ -829,9 +614,6 @@ pagesHolder.BackgroundTransparency = 1
 pagesHolder.Position = UDim2.new(0, 12, 0, 64)
 pagesHolder.Size = UDim2.new(1, -24, 1, -76)
 
---=========================================
--- PAGE 1 : FARM LOGIC UI
---=========================================
 local page1 = Instance.new("Frame")
 page1.Name = "Page1"
 page1.Parent = pagesHolder
@@ -921,9 +703,6 @@ feederBtn.MouseButton1Click:Connect(function()
 	updateFarmBtns()
 end)
 
---=========================================
--- PAGE 2 & 3: WHITELIST & THEMES
---=========================================
 local whitelistPage = Instance.new("Frame")
 whitelistPage.Name = "WhitelistPage"
 whitelistPage.Parent = pagesHolder
@@ -950,30 +729,18 @@ searchPadding.PaddingLeft = UDim.new(0, 12)
 searchPadding.PaddingRight = UDim.new(0, 12)
 
 local searchGradient = makeGradient(searchBox, 135)
-
 local searchStroke = Instance.new("UIStroke")
 searchStroke.Thickness = 1
 searchStroke.Parent = searchBox
 
-local whitelistInfo = Instance.new("TextLabel")
-whitelistInfo.Parent = whitelistPage
-whitelistInfo.BackgroundTransparency = 1
-whitelistInfo.Position = UDim2.new(0, 2, 0, 47)
-whitelistInfo.Size = UDim2.new(1, -4, 0, 18)
-whitelistInfo.Font = Enum.Font.Gotham
-whitelistInfo.TextSize = 11
-whitelistInfo.TextXAlignment = Enum.TextXAlignment.Left
-whitelistInfo.Text = "Click a player to toggle whitelist"
-
 local whitelistListHolder = Instance.new("Frame")
 whitelistListHolder.Parent = whitelistPage
-whitelistListHolder.Position = UDim2.new(0, 0, 0, 70)
-whitelistListHolder.Size = UDim2.new(1, 0, 1, -70)
+whitelistListHolder.Position = UDim2.new(0, 0, 0, 48)
+whitelistListHolder.Size = UDim2.new(1, 0, 1, -48)
 whitelistListHolder.BorderSizePixel = 0
 makeCorner(whitelistListHolder, 12)
 
 local whitelistListGradient = makeGradient(whitelistListHolder, 135)
-
 local whitelistListStroke = Instance.new("UIStroke")
 whitelistListStroke.Thickness = 1
 whitelistListStroke.Parent = whitelistListHolder
@@ -1007,7 +774,6 @@ themeHeader.BorderSizePixel = 0
 makeCorner(themeHeader, 12)
 
 local themeHeaderGradient = makeGradient(themeHeader, 135)
-
 local themeHeaderStroke = Instance.new("UIStroke")
 themeHeaderStroke.Thickness = 1
 themeHeaderStroke.Parent = themeHeader
@@ -1015,22 +781,12 @@ themeHeaderStroke.Parent = themeHeader
 local themeHeaderText = Instance.new("TextLabel")
 themeHeaderText.Parent = themeHeader
 themeHeaderText.BackgroundTransparency = 1
-themeHeaderText.Position = UDim2.new(0, 10, 0, 5)
+themeHeaderText.Position = UDim2.new(0, 10, 0, 13)
 themeHeaderText.Size = UDim2.new(1, -20, 0, 17)
 themeHeaderText.Font = Enum.Font.GothamBold
 themeHeaderText.TextSize = 14
 themeHeaderText.TextXAlignment = Enum.TextXAlignment.Left
 themeHeaderText.Text = "Theme Selector"
-
-local themeHeaderSub = Instance.new("TextLabel")
-themeHeaderSub.Parent = themeHeader
-themeHeaderSub.BackgroundTransparency = 1
-themeHeaderSub.Position = UDim2.new(0, 10, 0, 22)
-themeHeaderSub.Size = UDim2.new(1, -20, 0, 14)
-themeHeaderSub.Font = Enum.Font.Gotham
-themeHeaderSub.TextSize = 11
-themeHeaderSub.TextXAlignment = Enum.TextXAlignment.Left
-themeHeaderSub.Text = "Choose a style below"
 
 local themeScroll = Instance.new("ScrollingFrame")
 themeScroll.Parent = themePage
@@ -1056,7 +812,6 @@ preview.BorderSizePixel = 0
 makeCorner(preview, 12)
 
 local previewGradient = makeGradient(preview, 135)
-
 local previewStroke = Instance.new("UIStroke")
 previewStroke.Thickness = 1.1
 previewStroke.Parent = preview
@@ -1075,27 +830,9 @@ local categoryButtons = {}
 local themeButtons = {}
 
 local categories = {
-	{
-		Name = "Auto Farm",
-		Sub = "Farmer & Feeder",
-		Page = page1,
-		Title = "Asylum Auto Farm",
-		Subtitle = "Toggle your farming roles here"
-	},
-	{
-		Name = "Radar",
-		Sub = "Whitelist",
-		Page = whitelistPage,
-		Title = "Detection Setup",
-		Subtitle = "Server player whitelist"
-	},
-	{
-		Name = "Settings",
-		Sub = "Themes",
-		Page = themePage,
-		Title = "Settings",
-		Subtitle = "Theme selector page"
-	}
+	{Name = "Home", Page = page1, Title = "Home"},
+	{Name = "Whitelist", Page = whitelistPage, Title = "Whitelist"},
+	{Name = "Settings", Page = themePage, Title = "Settings"}
 }
 
 local function createCategoryButton(data, index)
@@ -1109,7 +846,6 @@ local function createCategoryButton(data, index)
 	makeCorner(button, 12)
 
 	local gradient = makeGradient(button, 135)
-
 	local stroke = Instance.new("UIStroke")
 	stroke.Thickness = 1
 	stroke.Parent = button
@@ -1117,29 +853,18 @@ local function createCategoryButton(data, index)
 	local label = Instance.new("TextLabel")
 	label.Parent = button
 	label.BackgroundTransparency = 1
-	label.Position = UDim2.new(0, 10, 0, 6)
+	label.Position = UDim2.new(0, 10, 0, 14)
 	label.Size = UDim2.new(1, -20, 0, 18)
 	label.Font = Enum.Font.GothamBold
 	label.TextSize = 14
 	label.TextXAlignment = Enum.TextXAlignment.Left
 	label.Text = data.Name
 
-	local sub = Instance.new("TextLabel")
-	sub.Parent = button
-	sub.BackgroundTransparency = 1
-	sub.Position = UDim2.new(0, 10, 0, 23)
-	sub.Size = UDim2.new(1, -20, 0, 14)
-	sub.Font = Enum.Font.Gotham
-	sub.TextSize = 11
-	sub.TextXAlignment = Enum.TextXAlignment.Left
-	sub.Text = data.Sub
-
 	categoryButtons[index] = {
 		Button = button,
 		Gradient = gradient,
 		Stroke = stroke,
-		Label = label,
-		Sub = sub
+		Label = label
 	}
 
 	return button
@@ -1157,7 +882,6 @@ local function createThemeButton(themeName)
 	makeCorner(button, 12)
 
 	local gradient = makeGradient(button, 135)
-
 	local stroke = Instance.new("UIStroke")
 	stroke.Thickness = 1
 	stroke.Parent = button
@@ -1247,15 +971,11 @@ local function refreshPlayerList()
 
 			button.MouseEnter:Connect(function()
 				if not isWhitelisted(targetPlayer) then
-					tweenObject(button, tweenFast, {
-						BackgroundColor3 = currentTheme.ButtonHover.Keypoints[1].Value
-					})
+					tweenObject(button, tweenFast, {BackgroundColor3 = currentTheme.ButtonHover.Keypoints[1].Value})
 				end
 			end)
 
-			button.MouseLeave:Connect(function()
-				updateButton()
-			end)
+			button.MouseLeave:Connect(function() updateButton() end)
 
 			button.MouseButton1Click:Connect(function()
 				if isWhitelisted(targetPlayer) then
@@ -1315,18 +1035,13 @@ local function setCategoryVisual(index, hovering)
 	if not data then return end
 
 	if selectedCategory == index then
-		data.Gradient.Color = ColorSequence.new{
-			ColorSequenceKeypoint.new(0, currentTheme.Accent),
-			ColorSequenceKeypoint.new(1, currentTheme.Accent2)
-		}
+		data.Gradient.Color = ColorSequence.new{ColorSequenceKeypoint.new(0, currentTheme.Accent), ColorSequenceKeypoint.new(1, currentTheme.Accent2)}
 		data.Stroke.Color = currentTheme.Accent2
 		data.Label.TextColor3 = Color3.fromRGB(255, 255, 255)
-		data.Sub.TextColor3 = Color3.fromRGB(255, 255, 255)
 	else
 		data.Gradient.Color = hovering and currentTheme.ButtonHover or currentTheme.Button
 		data.Stroke.Color = currentTheme.Stroke
 		data.Label.TextColor3 = currentTheme.Text
-		data.Sub.TextColor3 = currentTheme.SubText
 	end
 end
 
@@ -1336,10 +1051,7 @@ local function setThemeButtonVisual(selectedThemeName, buttonName, hovering)
 	if not btnData then return end
 
 	if selectedThemeName == buttonName then
-		btnData.Gradient.Color = ColorSequence.new{
-			ColorSequenceKeypoint.new(0, selectedThemeData.Accent),
-			ColorSequenceKeypoint.new(1, selectedThemeData.Accent2)
-		}
+		btnData.Gradient.Color = ColorSequence.new{ColorSequenceKeypoint.new(0, selectedThemeData.Accent), ColorSequenceKeypoint.new(1, selectedThemeData.Accent2)}
 		btnData.Stroke.Color = selectedThemeData.Accent2
 		btnData.Button.TextColor3 = Color3.fromRGB(255, 255, 255)
 	else
@@ -1358,7 +1070,6 @@ local function switchCategory(index)
 	end
 
 	pageTitle.Text = categories[index].Title
-	pageSubtitle.Text = categories[index].Subtitle
 end
 
 local function applyTheme(themeName)
@@ -1385,24 +1096,15 @@ local function applyTheme(themeName)
 	themeHeaderGradient.Color = theme.Topbar
 	themeHeaderStroke.Color = theme.Stroke
 
-	innerGradient.Color = ColorSequence.new{
-		ColorSequenceKeypoint.new(0, theme.Accent2),
-		ColorSequenceKeypoint.new(1, theme.Accent)
-	}
-
+	innerGradient.Color = ColorSequence.new{ColorSequenceKeypoint.new(0, theme.Accent2), ColorSequenceKeypoint.new(1, theme.Accent)}
 	title.TextColor3 = theme.Text
-	subtitle.TextColor3 = theme.SubText
 	pageTitle.TextColor3 = theme.Text
-	pageSubtitle.TextColor3 = theme.SubText
 	searchBox.TextColor3 = theme.Text
 	searchBox.PlaceholderColor3 = theme.SubText
-	whitelistInfo.TextColor3 = theme.SubText
 	themeHeaderText.TextColor3 = theme.Text
-	themeHeaderSub.TextColor3 = theme.SubText
 	previewLabel.TextColor3 = theme.Text
 	toggleButton.TextColor3 = theme.Text
 	
-	-- Theme Hook for Farmer UI
 	if role ~= "FARMER" then farmerGrad.Color = theme.Button end
 	if role ~= "FEEDER" then feederGrad.Color = theme.Button end
 	farmerStroke.Color = theme.Stroke
@@ -1411,31 +1113,17 @@ local function applyTheme(themeName)
 	feederBtn.TextColor3 = theme.Text
 	statusLbl.TextColor3 = theme.SubText
 
-	previewGradient.Color = ColorSequence.new{
-		ColorSequenceKeypoint.new(0, theme.Accent),
-		ColorSequenceKeypoint.new(1, theme.Accent2)
-	}
+	previewGradient.Color = ColorSequence.new{ColorSequenceKeypoint.new(0, theme.Accent), ColorSequenceKeypoint.new(1, theme.Accent2)}
 	previewStroke.Color = theme.Accent2
 	previewLabel.Text = "Current Theme: " .. themeName
 
-	glow1Gradient.Color = ColorSequence.new{
-		ColorSequenceKeypoint.new(0, theme.Glow),
-		ColorSequenceKeypoint.new(1, theme.Accent2)
-	}
-	glow2Gradient.Color = ColorSequence.new{
-		ColorSequenceKeypoint.new(0, theme.Accent),
-		ColorSequenceKeypoint.new(1, theme.Glow)
-	}
+	glow1Gradient.Color = ColorSequence.new{ColorSequenceKeypoint.new(0, theme.Glow), ColorSequenceKeypoint.new(1, theme.Accent2)}
+	glow2Gradient.Color = ColorSequence.new{ColorSequenceKeypoint.new(0, theme.Accent), ColorSequenceKeypoint.new(1, theme.Glow)}
 	glow1.BackgroundColor3 = theme.Glow
 	glow2.BackgroundColor3 = theme.Accent
 
-	for i = 1, #categories do
-		setCategoryVisual(i, false)
-	end
-
-	for name in pairs(themeButtons) do
-		setThemeButtonVisual(themeName, name, false)
-	end
+	for i = 1, #categories do setCategoryVisual(i, false) end
+	for name in pairs(themeButtons) do setThemeButtonVisual(themeName, name, false) end
 
 	for _, notifData in ipairs(activeNotifications) do
 		if notifData.Frame and notifData.Frame.Parent then
@@ -1448,50 +1136,34 @@ local function applyTheme(themeName)
 	end
 
 	for _, data in pairs(whitelistButtons) do
-		if data.Update then
-			data.Update()
-		end
+		if data.Update then data.Update() end
 	end
 
 	refreshPlayerList()
 end
 
 for i, data in ipairs(categoryButtons) do
-	data.Button.MouseEnter:Connect(function()
-		setCategoryVisual(i, true)
-	end)
-
-	data.Button.MouseLeave:Connect(function()
-		setCategoryVisual(i, false)
-	end)
-
-	data.Button.MouseButton1Click:Connect(function()
-		switchCategory(i)
-	end)
+	data.Button.MouseEnter:Connect(function() setCategoryVisual(i, true) end)
+	data.Button.MouseLeave:Connect(function() setCategoryVisual(i, false) end)
+	data.Button.MouseButton1Click:Connect(function() switchCategory(i) end)
 end
 
 for name, data in pairs(themeButtons) do
 	data.Button.MouseEnter:Connect(function()
 		setThemeButtonVisual(currentThemeName, name, true)
-		tweenObject(data.Button, tweenFast, {
-			Size = UDim2.new(0, 154, 0, 46)
-		})
+		tweenObject(data.Button, tweenFast, {Size = UDim2.new(0, 154, 0, 46)})
 	end)
 
 	data.Button.MouseLeave:Connect(function()
 		setThemeButtonVisual(currentThemeName, name, false)
-		tweenObject(data.Button, tweenFast, {
-			Size = UDim2.new(0, 150, 0, 44)
-		})
+		tweenObject(data.Button, tweenFast, {Size = UDim2.new(0, 150, 0, 44)})
 	end)
 
 	data.Button.MouseButton1Click:Connect(function()
 		applyTheme(name)
-
 		tweenObject(mainFrame, TweenInfo.new(0.16, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
 			Size = mobileMode and UDim2.new(0, 570, 0, 388) or UDim2.new(0, 732, 0, 450)
 		})
-
 		task.delay(0.16, function()
 			tweenObject(mainFrame, TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
 				Size = mobileMode and UDim2.new(0, 560, 0, 380) or UDim2.new(0, 720, 0, 440)
@@ -1533,14 +1205,8 @@ end
 
 toggleButton.MouseButton1Click:Connect(function()
 	local baseSize = mobileMode and UDim2.new(0, 130, 0, 50) or UDim2.new(0, 120, 0, 44)
-
-	tweenObject(toggleButton, tweenFast, {
-		Size = UDim2.new(baseSize.X.Scale, baseSize.X.Offset - 4, baseSize.Y.Scale, baseSize.Y.Offset - 4)
-	})
-
-	task.delay(0.08, function()
-		tweenObject(toggleButton, tweenFast, {Size = baseSize})
-	end)
+	tweenObject(toggleButton, tweenFast, {Size = UDim2.new(baseSize.X.Scale, baseSize.X.Offset - 4, baseSize.Y.Scale, baseSize.Y.Offset - 4)})
+	task.delay(0.08, function() tweenObject(toggleButton, tweenFast, {Size = baseSize}) end)
 
 	if isOpen then
 		isOpen = false
@@ -1560,7 +1226,6 @@ toggleButton.InputBegan:Connect(function(input)
 		draggingToggle = true
 		dragToggleStart = input.Position
 		toggleStartPos = toggleButton.Position
-
 		input.Changed:Connect(function()
 			if input.UserInputState == Enum.UserInputState.End then
 				draggingToggle = false
@@ -1579,10 +1244,8 @@ UserInputService.InputChanged:Connect(function(input)
 	if draggingToggle and input == dragToggleInput then
 		local delta = input.Position - dragToggleStart
 		toggleButton.Position = UDim2.new(
-			toggleStartPos.X.Scale,
-			toggleStartPos.X.Offset + delta.X,
-			toggleStartPos.Y.Scale,
-			toggleStartPos.Y.Offset + delta.Y
+			toggleStartPos.X.Scale, toggleStartPos.X.Offset + delta.X,
+			toggleStartPos.Y.Scale, toggleStartPos.Y.Offset + delta.Y
 		)
 	end
 end)
@@ -1597,7 +1260,6 @@ titleBar.InputBegan:Connect(function(input)
 		draggingMain = true
 		dragMainStart = input.Position
 		mainStartPos = mainFrame.Position
-
 		input.Changed:Connect(function()
 			if input.UserInputState == Enum.UserInputState.End then
 				draggingMain = false
@@ -1615,14 +1277,10 @@ end)
 UserInputService.InputChanged:Connect(function(input)
 	if draggingMain and input == mainDragInput then
 		local delta = input.Position - dragMainStart
-
 		mainFrame.Position = UDim2.new(
-			mainStartPos.X.Scale,
-			mainStartPos.X.Offset + delta.X,
-			mainStartPos.Y.Scale,
-			mainStartPos.Y.Offset + delta.Y
+			mainStartPos.X.Scale, mainStartPos.X.Offset + delta.X,
+			mainStartPos.Y.Scale, mainStartPos.Y.Offset + delta.Y
 		)
-
 		glowHolder.Position = mainFrame.Position
 	end
 end)
@@ -1665,9 +1323,6 @@ task.spawn(function()
 	notify("Detection", "Range: " .. tostring(DETECTION_RANGE))
 end)
 
---=========================================
--- UPDATED DETECTION & INSTANT DEATH LOGIC
---=========================================
 RunService.RenderStepped:Connect(function(deltaTime)
 	if not detectionEnabled or not detectionPosition then return end
 
@@ -1675,7 +1330,7 @@ RunService.RenderStepped:Connect(function(deltaTime)
 	if lastCheck < DETECTION_CHECK_DELAY then return end
 	lastCheck = 0
 
-    local dangerFound = false
+	local dangerFound = false
 
 	for _, targetPlayer in ipairs(Players:GetPlayers()) do
 		if targetPlayer ~= player then
@@ -1693,11 +1348,11 @@ RunService.RenderStepped:Connect(function(deltaTime)
 						local inside = playerIsInsideWallAwareArea(otherHRP)
 
 						if inside then
-                            dangerFound = true
-                            if not detectedPlayers[targetPlayer] then
-							    detectedPlayers[targetPlayer] = true
-							    notify("⚠️ Player Detected", targetPlayer.Name .. " entered! Terminating...")
-                            end
+							dangerFound = true
+							if not detectedPlayers[targetPlayer] then
+								detectedPlayers[targetPlayer] = true
+								notify("Player Detected", targetPlayer.Name .. " entered! Terminating...")
+							end
 						elseif not inside and detectedPlayers[targetPlayer] then
 							detectedPlayers[targetPlayer] = nil
 							notify("Player Left", targetPlayer.Name .. " left the area")
@@ -1716,54 +1371,42 @@ RunService.RenderStepped:Connect(function(deltaTime)
 		end
 	end
 
-    -- Handle Instant Death and Resume
-    if dangerFound then
-        if running then
-            savedRole = role
-            running = false
-            isPausedForSafety = true
-            updateFarmBtns()
-            setStatus("TERMINATING")
-            
-            -- INSTANT DEATH LOGIC
-            if hum then
-                hum.Health = 0
-            end
-        end
-    else
-        if isPausedForSafety and not dangerFound then
-            isPausedForSafety = false
-            notify("Safe", "Area clear. Resuming in 5s...")
-            task.delay(5, function()
-                -- ✅ BUG FIX: Removed 'alive()' check here! 
-                -- If we wait 5s, character might still be respawning. We just set running back to true unconditionally.
-                if not isPausedForSafety and savedRole then 
-                    role = savedRole
-                    running = true
-                    updateFarmBtns()
-                    setStatus("Resumed")
-                end
-            end)
-        end
-    end
+	if dangerFound then
+		if running then
+			savedRole = role
+			running = false
+			isPausedForSafety = true
+			updateFarmBtns()
+			setStatus("TERMINATING")
+			
+			if hum then
+				hum.Health = 0
+			end
+		end
+	else
+		if isPausedForSafety and not dangerFound then
+			isPausedForSafety = false
+			notify("Safe", "Area clear. Resuming in 5s...")
+			task.delay(5, function()
+				if not isPausedForSafety and savedRole then 
+					role = savedRole
+					running = true
+					updateFarmBtns()
+					setStatus("Resumed")
+				end
+			end)
+		end
+	end
 end)
 
 task.spawn(function()
 	while screenGui.Parent do
-		tweenObject(glow1, TweenInfo.new(2.6, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), {
-			Position = UDim2.new(0.3, 0, 0.32, 0)
-		})
-		tweenObject(glow2, TweenInfo.new(2.6, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), {
-			Position = UDim2.new(0.7, 0, 0.68, 0)
-		})
+		tweenObject(glow1, TweenInfo.new(2.6, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), {Position = UDim2.new(0.3, 0, 0.32, 0)})
+		tweenObject(glow2, TweenInfo.new(2.6, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), {Position = UDim2.new(0.7, 0, 0.68, 0)})
 		task.wait(2.6)
 
-		tweenObject(glow1, TweenInfo.new(2.6, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), {
-			Position = UDim2.new(0.25, 0, 0.26, 0)
-		})
-		tweenObject(glow2, TweenInfo.new(2.6, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), {
-			Position = UDim2.new(0.76, 0, 0.74, 0)
-		})
+		tweenObject(glow1, TweenInfo.new(2.6, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), {Position = UDim2.new(0.25, 0, 0.26, 0)})
+		tweenObject(glow2, TweenInfo.new(2.6, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), {Position = UDim2.new(0.76, 0, 0.74, 0)})
 		task.wait(2.6)
 	end
 end)
