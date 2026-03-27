@@ -6,6 +6,7 @@ local TweenService = game:GetService("TweenService")
 local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local VirtualUser = game:GetService("VirtualUser")
+local PathfindingService = game:GetService("PathfindingService")
 
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
@@ -23,7 +24,46 @@ end)
 --=========================================
 local BOTS  = { PearTeto_Real = true, IamtotallynotPearman = true }
 local DEST  = CFrame.new(-10.160541534423828, 255.27276611328125, -611.555908203125)
-local TI    = TweenInfo.new(1, Enum.EasingStyle.Linear)
+
+-- ✅ 3D RING/ZONE SETTINGS
+local RING_POSITION = Vector3.new(-19.12, 256.01, -595.00)
+local RING_SIZE = Vector3.new(26, 12, 26)
+local RING_ROTATION_Y = -30 -- degrees
+local ringCFrame = CFrame.new(RING_POSITION) * CFrame.Angles(0, math.rad(RING_ROTATION_Y), 0)
+
+-- Create the INVISIBLE Box in Workspace
+local ringVisualsFolder = workspace:FindFirstChild("RingVisuals")
+if not ringVisualsFolder then
+	ringVisualsFolder = Instance.new("Folder")
+	ringVisualsFolder.Name = "RingVisuals"
+	ringVisualsFolder.Parent = workspace
+	
+	local boxPart = Instance.new("Part")
+	boxPart.Name = "DetectionBox"
+	boxPart.Size = RING_SIZE
+	boxPart.CFrame = ringCFrame
+	boxPart.Anchored = true
+	boxPart.CanCollide = false
+	boxPart.CanTouch = false
+	boxPart.CanQuery = false
+	boxPart.Transparency = 1 -- Invisible
+	boxPart.Parent = ringVisualsFolder
+
+	local selectionBox = Instance.new("SelectionBox")
+	selectionBox.Adornee = boxPart
+	selectionBox.LineThickness = 0
+	selectionBox.Transparency = 1 -- Invisible
+	selectionBox.Parent = boxPart
+
+	local centerMarker = Instance.new("Part")
+	centerMarker.Shape = Enum.PartType.Ball
+	centerMarker.Size = Vector3.new(2.5, 2.5, 2.5)
+	centerMarker.CFrame = CFrame.new(RING_POSITION)
+	centerMarker.Anchored = true
+	centerMarker.CanCollide = false
+	centerMarker.Transparency = 1 -- Invisible
+	centerMarker.Parent = ringVisualsFolder
+end
 
 local dead    = false
 local role    = nil
@@ -52,22 +92,146 @@ player.CharacterAdded:Connect(function()
 	refreshChar()
 end)
 
+-- ✅ CHECK IF IN 3D BOX
 local function inRing()
 	if not alive() then return false end
-	return root.Position.Y > 255.6
+	
+	local relative = ringCFrame:PointToObjectSpace(root.Position)
+	local halfSize = RING_SIZE / 2
+
+	return math.abs(relative.X) <= halfSize.X
+		and math.abs(relative.Y) <= halfSize.Y
+		and math.abs(relative.Z) <= halfSize.Z
 end
 
-local function tweenTo()
-	if not alive() then return nil end
-	local t = TweenService:Create(root, TI, { CFrame = DEST })
-	t:Play()
-	return t
+--=========================================
+-- NOCLIP LOGIC
+--=========================================
+local noclipConnection = nil
+
+local function toggleNoclip(state)
+	if state then
+		if not noclipConnection then
+			noclipConnection = RunService.Stepped:Connect(function()
+				if alive() then
+					for _, v in ipairs(char:GetChildren()) do
+						if v:IsA("BasePart") then
+							v.CanCollide = false
+						end
+					end
+				end
+			end)
+		end
+	else
+		if noclipConnection then
+			noclipConnection:Disconnect()
+			noclipConnection = nil
+		end
+	end
+end
+
+-- Disable noclip naturally when respawning
+player.CharacterAdded:Connect(function() toggleNoclip(false) end)
+
+--=========================================
+-- PATHFINDING & VISUALS LOGIC
+--=========================================
+local pathParams = {
+	AgentRadius = 3, 
+	AgentHeight = 5,
+	AgentCanJump = true,
+	WaypointSpacing = 3 
+}
+
+local visualsFolder = workspace:FindFirstChild("PathVisuals")
+if not visualsFolder then
+	visualsFolder = Instance.new("Folder")
+	visualsFolder.Name = "PathVisuals"
+	visualsFolder.Parent = workspace
+end
+
+local function clearWaypoints()
+	for _, child in ipairs(visualsFolder:GetChildren()) do
+		child:Destroy()
+	end
+end
+
+local function drawWaypoints(waypoints)
+	clearWaypoints() 
+	for i, waypoint in ipairs(waypoints) do
+		local part = Instance.new("Part")
+		part.Shape = Enum.PartType.Ball
+		part.Material = Enum.Material.Neon
+		part.Size = Vector3.new(1, 1, 1)
+		part.Position = waypoint.Position
+		part.Anchored = true
+		part.CanCollide = false 
+		part.Parent = visualsFolder
+
+		if waypoint.Action == Enum.PathWaypointAction.Jump then
+			part.Color = Color3.fromRGB(255, 100, 100) 
+		else
+			part.Color = Color3.fromRGB(100, 255, 100) 
+		end
+	end
+end
+
+-- ✅ "ACTIVE ACTIVE" RECALCULATING PATHING
+local function walkActive()
+	-- Stay inside this active loop while we need to walk
+	while running and alive() and not inRing() and (role == "FARMER" or role == "FEEDER") do
+		local path = PathfindingService:CreatePath(pathParams)
+		local success, errorMessage = pcall(function()
+			path:ComputeAsync(root.Position, DEST.Position)
+		end)
+
+		if success and path.Status == Enum.PathStatus.Success then
+			local waypoints = path:GetWaypoints()
+			drawWaypoints(waypoints)
+
+			-- MAGIC TRICK: Only walk exactly 3 waypoints forward, then break to recalculate
+			local stepLimit = math.min(#waypoints, 4) 
+			
+			for i = 2, stepLimit do
+				if not running or not alive() or inRing() or (role ~= "FARMER" and role ~= "FEEDER") then 
+					break -- Break the loop instantly
+				end
+
+				if waypoints[i].Action == Enum.PathWaypointAction.Jump then
+					hum.Jump = true
+				end
+
+				hum:MoveTo(waypoints[i].Position)
+				
+				-- Short 1.2s timeout to make it hyper-responsive to being stuck
+				local reached = hum.MoveToFinished:Wait(1.2)
+				
+				if not reached then
+					-- Stuck or User Overrode Controls: Instantly trigger Noclip, Jump, and Recalculate!
+					hum.Jump = true 
+					toggleNoclip(true)
+					
+					task.delay(3, function() 
+						toggleNoclip(false) 
+					end)
+					
+					break -- Force outer while-loop to recalculate instantly
+				end
+			end
+		else
+			-- If pathing fails to compute, blindly step towards destination
+			hum:MoveTo(DEST.Position)
+			hum.MoveToFinished:Wait(1.5)
+		end
+	end
+	
+	clearWaypoints()
 end
 
 -- The Farming Loop
 task.spawn(function()
 	while not dead do
-		task.wait(0.5)
+		task.wait(0.2)
 		if dead or role ~= "FARMER" or not running or not alive() then continue end
 
 		if inRing() then
@@ -75,18 +239,17 @@ task.spawn(function()
 			while not dead and role == "FARMER" and running and alive() and inRing() do
 				task.wait(0.5)
 			end
-			setStatus("left ring — tweening back")
+			setStatus("left ring — pathing back")
 		else
-			local t = tweenTo()
-			if t then t.Completed:Wait() end
-			setStatus("tween done")
+			setStatus("active pathing...")
+			walkActive() -- Calls the new Active Real-time Pathing loop
 		end
 	end
 end)
 
 task.spawn(function()
 	while not dead do
-		task.wait(3)
+		task.wait(0.2) 
 		if dead or role ~= "FEEDER" or not running or not alive() then continue end
 		
 		if inRing() then
@@ -94,8 +257,9 @@ task.spawn(function()
 			if hum then
 				hum.Health = 0 
 			end
+			task.wait(2) -- Tiny buffer so it doesn't spam kill while the screen turns gray
 		else
-			tweenTo()
+			walkActive()
 		end
 	end
 end)
@@ -1571,8 +1735,9 @@ RunService.RenderStepped:Connect(function(deltaTime)
             isPausedForSafety = false
             notify("Safe", "Area clear. Resuming in 5s...")
             task.delay(5, function()
-                -- Ensure no new danger appeared and we are back in character
-                if not isPausedForSafety and savedRole and alive() then
+                -- ✅ BUG FIX: Removed 'alive()' check here! 
+                -- If we wait 5s, character might still be respawning. We just set running back to true unconditionally.
+                if not isPausedForSafety and savedRole then 
                     role = savedRole
                     running = true
                     updateFarmBtns()
