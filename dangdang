@@ -71,6 +71,7 @@ local isPausedForSafety = false
 local savedRole = nil
 local currentHealTarget = nil 
 local currentArrestTarget = nil
+local isArrestingCombo = false
 
 -- placeholders for ui functions initialized later
 local setStatus = function(txt) end
@@ -85,6 +86,7 @@ local function removeDoors()
 			count += 1
 		end
 	end
+	print("cleaned up " .. count .. " doors")
 end
 
 -- ALL 7 UI THEMES
@@ -291,6 +293,13 @@ end
 
 -- draws the infinite neon trail mapped directly to the floor!
 local function drawWaypoints(waypoints)
+	-- safety check if folder got deleted
+	if not visualsFolder or not visualsFolder.Parent then
+		visualsFolder = Instance.new("Folder")
+		visualsFolder.Name = "PathVisuals"
+		visualsFolder.Parent = workspace
+	end
+
 	local maxWpToDraw = #waypoints 
 	local floorPositions = {}
 	
@@ -300,13 +309,18 @@ local function drawWaypoints(waypoints)
 		local pos = floorPositions[i]
 		local joint = jointPool[i]
 		
-		if not joint then
-			joint = Instance.new("Part")
-			joint.Shape = Enum.PartType.Ball
-			joint.Anchored = true; joint.CanCollide = false; joint.CanQuery = false
-			joint.Material = Enum.Material.Neon; joint.Parent = visualsFolder
-			jointPool[i] = joint
+		-- FIX: explicitly set parent back to folder if reusing a cached part
+		if not joint or not joint.Parent then
+			if not joint then
+				joint = Instance.new("Part")
+				joint.Shape = Enum.PartType.Ball
+				joint.Anchored = true; joint.CanCollide = false; joint.CanQuery = false
+				joint.Material = Enum.Material.Neon
+				jointPool[i] = joint
+			end
+			joint.Parent = visualsFolder
 		end
+		
 		joint.Size = Vector3.new(1.2, 1.2, 1.2)
 		joint.Position = pos
 		
@@ -324,13 +338,19 @@ local function drawWaypoints(waypoints)
 			
 			local dist = (pos - nextPos).Magnitude
 			local line = partPool[i]
-			if not line then
-				line = Instance.new("Part")
-				line.Shape = Enum.PartType.Cylinder
-				line.Anchored = true; line.CanCollide = false; line.CanQuery = false
-				line.Material = Enum.Material.Neon; line.Parent = visualsFolder
-				partPool[i] = line
+			
+			-- FIX: explicitly set parent back to folder if reusing a cached part
+			if not line or not line.Parent then
+				if not line then
+					line = Instance.new("Part")
+					line.Shape = Enum.PartType.Cylinder
+					line.Anchored = true; line.CanCollide = false; line.CanQuery = false
+					line.Material = Enum.Material.Neon
+					partPool[i] = line
+				end
+				line.Parent = visualsFolder
 			end
+			
 			line.Size = Vector3.new(dist, 0.8, 0.8) 
 			line.CFrame = CFrame.lookAt(pos, nextPos) * CFrame.new(0, 0, -dist/2) * CFrame.Angles(0, math.rad(90), 0)
 			
@@ -342,7 +362,7 @@ local function drawWaypoints(waypoints)
 		end
 	end
 	
-	-- cleans up the leftover trail pieces from old paths
+	-- cleans up the leftover trail pieces from old paths by hiding them
 	for i = maxWpToDraw + 1, #jointPool do if jointPool[i] then jointPool[i].Parent = nil end end
 	for i = maxWpToDraw, #partPool do if partPool[i] then partPool[i].Parent = nil end end
 end
@@ -605,6 +625,7 @@ task.spawn(function()
 				if not alive() then
 					setStatus("waiting to respawn...")
 					currentWaypoints = {}; lastComputedTargetPos = nil; currentWpIndex = 1
+					drawWaypoints({}) -- FIX: visually clears the old path trail instantly upon death!
 					task.wait(1.5) 
 					return 
 				end
@@ -1117,6 +1138,7 @@ setStatus = function(txt) if statusLbl then statusLbl.Text = "Status: " .. txt e
 local function resetBotState()
 	running = false; role = nil; targetHighlight.Adornee = nil
 	currentWaypoints = {}; lastComputedTargetPos = nil; currentWpIndex = 1
+	drawWaypoints({}) -- instantly clears trail
 	stopCharacter(); setStatus("Idle")
 end
 
@@ -1599,4 +1621,4 @@ task.spawn(function()
 	end
 end)
 
-switchCategory(1); refreshPlayerList(); applyTheme("Dark")
+switchCategory(1); refreshPlayerList(); applyTheme("Emerald")
