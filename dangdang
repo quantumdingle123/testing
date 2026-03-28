@@ -19,10 +19,10 @@ player.Idled:Connect(function()
 	VirtualUser:ClickButton2(Vector2.new())
 end)
 
--- restored the original destination for farmer/feeder
+-- the spot we walk to for the feeder role
 local DEST = CFrame.new(-10.160541534423828, 255.27276611328125, -611.555908203125)
 
--- original ring setup stuff
+-- ring setup stuff
 local RING_POSITION = Vector3.new(-19.12, 256.01, -595.00)
 local RING_SIZE = Vector3.new(26, 12, 26)
 local RING_ROTATION_Y = -30
@@ -85,10 +85,9 @@ local function removeDoors()
 			count += 1
 		end
 	end
-	print("cleaned up " .. count .. " doors")
 end
 
--- ALL 7 UI THEMES (Safe and sound!)
+-- ALL 7 UI THEMES
 local Themes = {
 	Dark = {
 		Main = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(18, 18, 24)), ColorSequenceKeypoint.new(0.5, Color3.fromRGB(28, 28, 36)), ColorSequenceKeypoint.new(1, Color3.fromRGB(38, 38, 48))},
@@ -151,7 +150,7 @@ local Themes = {
 local currentThemeName = "Emerald"
 local currentTheme = Themes[currentThemeName]
 
--- helper func to grab our character pieces without throwing errors
+-- helper func to grab our character pieces safely
 local function getLatest()
 	local c = player.Character
 	if not c then return nil, nil, nil end
@@ -276,13 +275,31 @@ end
 local partPool = {}
 local jointPool = {}
 
--- draws the infinite neon trail showing exactly where the bot is going
+-- Raycasts downward to find the actual floor to paint the trail exactly on the ground
+local function getFloorPosition(basePos)
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	local c = player.Character
+	params.FilterDescendantsInstances = c and {c, visualsFolder, ringVisualsFolder} or {visualsFolder, ringVisualsFolder}
+	
+	local result = workspace:Raycast(basePos + Vector3.new(0, 3, 0), Vector3.new(0, -15, 0), params)
+	if result then
+		return result.Position + Vector3.new(0, 0.2, 0) 
+	end
+	return basePos - Vector3.new(0, 2, 0) 
+end
+
+-- draws the infinite neon trail mapped directly to the floor!
 local function drawWaypoints(waypoints)
-	local maxWpToDraw = #waypoints -- Uncapped so we can see long-range trails!
+	local maxWpToDraw = #waypoints 
+	local floorPositions = {}
 	
 	for i = 1, maxWpToDraw do
-		local pos = waypoints[i].Position + Vector3.new(0, 0.5, 0)
+		floorPositions[i] = getFloorPosition(waypoints[i].Position)
+		
+		local pos = floorPositions[i]
 		local joint = jointPool[i]
+		
 		if not joint then
 			joint = Instance.new("Part")
 			joint.Shape = Enum.PartType.Ball
@@ -300,7 +317,11 @@ local function drawWaypoints(waypoints)
 		end
 		
 		if i < maxWpToDraw then
-			local nextPos = waypoints[i+1].Position + Vector3.new(0, 0.5, 0)
+			if not floorPositions[i+1] then
+				floorPositions[i+1] = getFloorPosition(waypoints[i+1].Position)
+			end
+			local nextPos = floorPositions[i+1]
+			
 			local dist = (pos - nextPos).Magnitude
 			local line = partPool[i]
 			if not line then
@@ -366,7 +387,6 @@ task.spawn(function()
 					end
 					
 				elseif role == "ARREST" then
-					-- Normal hostile hunting directly to the target
 					currentArrestTarget = getClosestHostilePlayer()
 					if currentArrestTarget and currentArrestTarget.Character then
 						targetHighlight.Adornee = currentArrestTarget.Character
@@ -377,7 +397,6 @@ task.spawn(function()
 					end
 					
 				else
-					-- Farmer and Feeder use DEST as the target point
 					targetHighlight.Adornee = nil
 					if not inRing() then shouldPath = true end
 				end
@@ -399,14 +418,8 @@ task.spawn(function()
 								drawWaypoints(currentWaypoints)
 							end
 						else
-							-- fallback: if pathing completely fails, draw a straight line to target and walk towards it
-							currentWaypoints = {
-								{Position = r.Position, Action = Enum.PathWaypointAction.Walk},
-								{Position = targetPos, Action = Enum.PathWaypointAction.Walk}
-							}
-							currentWpIndex = 2
-							drawWaypoints(currentWaypoints)
-							pcall(function() h:MoveTo(targetPos) end)
+							-- If it totally fails, just hold the last known path or wait for next tick.
+							lastComputedTargetPos = nil
 						end
 					end
 				end
@@ -415,7 +428,7 @@ task.spawn(function()
 	end
 end)
 
--- physical movement loop: physically makes the humanoid walk node to node
+-- physical movement loop: physically makes the humanoid walk node to node, with obstacle avoidance
 task.spawn(function()
 	while not dead do
 		task.wait(0.05) 
@@ -423,13 +436,27 @@ task.spawn(function()
 			if (role == "FARMER" or role == "FEEDER") and inRing() then continue end
 			
 			local c, h, r = getLatest()
-			if h and r and #currentWaypoints > 0 and currentWpIndex <= #currentWaypoints then
-				local wp = currentWaypoints[currentWpIndex]
-				if wp.Action == Enum.PathWaypointAction.Jump then h.Jump = true end
-				pcall(function() h:MoveTo(wp.Position) end)
+			if h and r then
 				
-				local dist = (r.Position * Vector3.new(1,0,1) - wp.Position * Vector3.new(1,0,1)).Magnitude
-				if dist < 4.0 then currentWpIndex += 1 end
+				-- "Whiskers" (Wall Raycasting) to prevent getting stuck
+				local params = RaycastParams.new()
+				params.FilterType = Enum.RaycastFilterType.Exclude
+				params.FilterDescendantsInstances = {c, visualsFolder, ringVisualsFolder}
+				local frontHit = workspace:Raycast(r.Position, r.CFrame.LookVector * 3.5, params)
+				
+				-- if it hits something solid, vault over it
+				if frontHit and frontHit.Instance and frontHit.Instance.CanCollide then
+					h.Jump = true
+				end
+				
+				if #currentWaypoints > 0 and currentWpIndex <= #currentWaypoints then
+					local wp = currentWaypoints[currentWpIndex]
+					if wp.Action == Enum.PathWaypointAction.Jump then h.Jump = true end
+					pcall(function() h:MoveTo(wp.Position) end)
+					
+					local dist = (r.Position * Vector3.new(1,0,1) - wp.Position * Vector3.new(1,0,1)).Magnitude
+					if dist < 4.0 then currentWpIndex += 1 end
+				end
 			end
 		end
 	end
@@ -535,7 +562,7 @@ local function performHealSequence(targetPlayer)
 	if humanoid then humanoid:UnequipTools() end
 end
 
--- brutal arrest logic: 1s taser spam, followed by 1s box spam, over and over
+-- brutal arrest logic: 1s taser spam, followed by 1s box spam, asynchronously
 local function performArrestSequence(targetPlayer)
 	local c, h = getLatest()
 	if not c or not targetPlayer.Character then return end
@@ -549,7 +576,6 @@ local function performArrestSequence(targetPlayer)
 		local taserEvent = taser and taser:FindFirstChild("TaserEvent")
 		
 		if taserEvent and torso then
-			setStatus("Zapping: " .. targetPlayer.DisplayName)
 			local startTime = tick()
 			while tick() - startTime < 1 and targetPlayer.Character and alive() do
 				task.spawn(function() pcall(function() taserEvent:InvokeServer("Tase", torso) end) end)
@@ -560,7 +586,6 @@ local function performArrestSequence(targetPlayer)
 	
 	-- 2. yank out the box and spam it for 1 second
 	if equipToolTarget("Box") and detainRemote then
-		setStatus("Boxing: " .. targetPlayer.DisplayName)
 		local startTime = tick()
 		while tick() - startTime < 1 and targetPlayer.Character and alive() do
 			task.spawn(function() pcall(function() detainRemote:FireServer(targetPlayer) end) end)
@@ -568,7 +593,6 @@ local function performArrestSequence(targetPlayer)
 		end
 	end
 	
-	-- unequip everything when we're done looping
 	if h then h:UnequipTools() end
 end
 
@@ -626,10 +650,27 @@ task.spawn(function()
 						local c, h, r = getLatest()
 						if r and tr then
 							local dist = (r.Position - tr.Position).Magnitude
-							if dist <= 30 then
-								-- target is within 30 studs: stop moving completely and execute the brutal 2-second combo
+							
+							-- only stop walking if we are basically touching them (3 studs)
+							if dist <= 3 then
 								currentWaypoints = {}; lastComputedTargetPos = nil; currentWpIndex = 1; stopCharacter()
-								performArrestSequence(currentArrestTarget)
+							end
+							
+							-- if they are within 30 studs, blast them while walking!
+							if dist <= 30 then
+								if not isArrestingCombo then
+									isArrestingCombo = true
+									task.spawn(function()
+										performArrestSequence(currentArrestTarget)
+										isArrestingCombo = false
+									end)
+								end
+								
+								if dist > 3 then
+									setStatus("Chasing & Attacking: " .. currentArrestTarget.DisplayName)
+								else
+									setStatus("Arresting: " .. currentArrestTarget.DisplayName)
+								end
 							else
 								setStatus("Pursuing hostile: " .. currentArrestTarget.DisplayName)
 							end
@@ -1243,7 +1284,7 @@ previewLabel.Size = UDim2.new(1, -20, 1, 0)
 previewLabel.Font = Enum.Font.GothamMedium
 previewLabel.TextSize = 14
 previewLabel.TextXAlignment = Enum.TextXAlignment.Left
-previewLabel.Text = "Current Theme: Dark"
+previewLabel.Text = "Current Theme: Emerald"
 
 local categoryButtons = {}
 local themeButtons = {}
