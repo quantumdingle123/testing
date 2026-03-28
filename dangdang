@@ -1,5 +1,6 @@
 if _G.AsylumFarmKill then _G.AsylumFarmKill() end
 
+-- services we need
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
 local TweenService = game:GetService("TweenService")
@@ -8,24 +9,26 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local VirtualUser = game:GetService("VirtualUser")
 local PathfindingService = game:GetService("PathfindingService")
 
+-- player vars
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
 
--- Anti-AFK
+-- fake some clicks so we don't get kicked for being afk
 player.Idled:Connect(function()
 	VirtualUser:CaptureController()
 	VirtualUser:ClickButton2(Vector2.new())
 end)
 
-local BOTS = { PearTeto_Real = true, IamtotallynotPearman = true }
+-- restored the original destination for farmer/feeder
 local DEST = CFrame.new(-10.160541534423828, 255.27276611328125, -611.555908203125)
 
+-- original ring setup stuff
 local RING_POSITION = Vector3.new(-19.12, 256.01, -595.00)
 local RING_SIZE = Vector3.new(26, 12, 26)
 local RING_ROTATION_Y = -30
 local ringCFrame = CFrame.new(RING_POSITION) * CFrame.Angles(0, math.rad(RING_ROTATION_Y), 0)
 
--- Visualizing the Ring
+-- drawing the safe zone box so we can actually see it
 local ringVisualsFolder = workspace:FindFirstChild("RingVisuals")
 if not ringVisualsFolder then
 	ringVisualsFolder = Instance.new("Folder")
@@ -48,31 +51,44 @@ if not ringVisualsFolder then
 	selectionBox.LineThickness = 0
 	selectionBox.Transparency = 1
 	selectionBox.Parent = boxPart
-
-	local centerMarker = Instance.new("Part")
-	centerMarker.Shape = Enum.PartType.Ball
-	centerMarker.Size = Vector3.new(2.5, 2.5, 2.5)
-	centerMarker.CFrame = CFrame.new(RING_POSITION)
-	centerMarker.Anchored = true
-	centerMarker.CanCollide = false
-	centerMarker.Transparency = 1
-	centerMarker.Parent = ringVisualsFolder
 end
 
--- Bot State
+-- highlight for the player we are currently targeting
+local targetHighlight = Instance.new("Highlight")
+targetHighlight.Name = "TargetHighlight"
+targetHighlight.FillColor = Color3.fromRGB(86, 220, 156) 
+targetHighlight.FillTransparency = 0.5
+targetHighlight.OutlineColor = Color3.fromRGB(255, 255, 255)
+targetHighlight.OutlineTransparency = 0.2
+targetHighlight.Parent = ringVisualsFolder
+targetHighlight.Adornee = nil
+
+-- states and target tracking
 local dead = false
 local role = nil
 local running = false
 local isPausedForSafety = false
 local savedRole = nil
+local currentHealTarget = nil 
+local currentArrestTarget = nil
 
+-- placeholders for ui functions initialized later
 local setStatus = function(txt) end
 local updateFarmBtns = function() end
 
--- ==========================================
--- GUI & Themes (UPGRADED DESIGN)
--- ==========================================
+-- deletes doors so they dont mess up our pathfinding
+local function removeDoors()
+	local count = 0
+	for _, object in pairs(workspace:GetDescendants()) do
+		if string.find(string.lower(object.Name), "door") then
+			pcall(function() object:Destroy() end)
+			count += 1
+		end
+	end
+	print("cleaned up " .. count .. " doors")
+end
 
+-- ALL 7 UI THEMES (Safe and sound!)
 local Themes = {
 	Dark = {
 		Main = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(18, 18, 24)), ColorSequenceKeypoint.new(0.5, Color3.fromRGB(28, 28, 36)), ColorSequenceKeypoint.new(1, Color3.fromRGB(38, 38, 48))},
@@ -132,13 +148,10 @@ local Themes = {
 	}
 }
 
-local currentThemeName = "Dark"
+local currentThemeName = "Emerald"
 local currentTheme = Themes[currentThemeName]
 
--- ==========================================
--- Character & Movement Logic
--- ==========================================
-
+-- helper func to grab our character pieces without throwing errors
 local function getLatest()
 	local c = player.Character
 	if not c then return nil, nil, nil end
@@ -147,39 +160,111 @@ local function getLatest()
 	return c, h, r
 end
 
+-- checks if we are spawned in and actually alive
 local function alive()
 	local c, h, r = getLatest()
 	return (c ~= nil and h ~= nil and r ~= nil and h.Health > 0 and c.Parent ~= nil)
 end
 
+-- checks if our character is sitting safely inside the ring
 local function inRing()
 	local c, h, r = getLatest()
 	if not (c and h and r and h.Health > 0) then return false end
-	
 	local relative = ringCFrame:PointToObjectSpace(r.Position)
 	local halfSize = RING_SIZE / 2
-
-	return math.abs(relative.X) <= halfSize.X
-		and math.abs(relative.Y) <= halfSize.Y
-		and math.abs(relative.Z) <= halfSize.Z
+	return math.abs(relative.X) <= halfSize.X and math.abs(relative.Y) <= halfSize.Y and math.abs(relative.Z) <= halfSize.Z
 end
 
+-- stops the character in their tracks
 local function stopCharacter()
 	local c, h, r = getLatest()
-	if h and r then
-		pcall(function() h:MoveTo(r.Position) end)
-	end
+	if h and r then pcall(function() h:MoveTo(r.Position) end) end
 end
 
--- ==========================================
--- SEAMLESS PATHFINDING & TRUE NOCLIP
--- ==========================================
+-- peeks at a player's overhead UI to check for the hostile tag
+local function isHostile(targetChar)
+	local pGui = player:FindFirstChild("PlayerGui")
+	local overheadGuis = pGui and pGui:FindFirstChild("OverheadGuis")
+	if not overheadGuis then return false end
+	
+	for _, gui in ipairs(overheadGuis:GetChildren()) do
+		if gui:IsA("BillboardGui") and gui.Adornee and gui.Adornee:IsDescendantOf(targetChar) then
+			local holder = gui:FindFirstChild("Holder")
+			local hostileTag = holder and holder:FindFirstChild("Hostile")
+			
+			if hostileTag and hostileTag:IsA("TextLabel") and hostileTag.Visible then
+				if string.find(string.lower(hostileTag.Text), "hostile") then return true end
+			end
+		end
+	end
+	return false
+end
+
+-- loops through the server and finds the closest injured person
+local function getClosestHurtPlayer()
+	local closest, minDist = nil, math.huge
+	local c, h, r = getLatest()
+	if not r then return nil end
+
+	for _, p in ipairs(Players:GetPlayers()) do
+		if p ~= player and p.Character then
+			local th = p.Character:FindFirstChildOfClass("Humanoid")
+			local tr = p.Character:FindFirstChild("HumanoidRootPart")
+			
+			if th and tr and th.Health > 0 and th.Health < th.MaxHealth then
+				local dist = (r.Position - tr.Position).Magnitude
+				if dist < minDist then minDist = dist; closest = p end
+			end
+		end
+	end
+	return closest
+end
+
+-- loops through the server and finds the closest hostile to arrest
+local function getClosestHostilePlayer()
+	local closest, minDist = nil, math.huge
+	local c, h, r = getLatest()
+	if not r then return nil end
+
+	for _, p in ipairs(Players:GetPlayers()) do
+		if p ~= player and p.Character then
+			local th = p.Character:FindFirstChildOfClass("Humanoid")
+			local tr = p.Character:FindFirstChild("HumanoidRootPart")
+			
+			if th and tr and th.Health > 0 and isHostile(p.Character) then
+				local dist = (r.Position - tr.Position).Magnitude
+				if dist < minDist then minDist = dist; closest = p end
+			end
+		end
+	end
+	return closest
+end
+
+-- proximity prompt hack: forces prompts to be visible and extends our reach
+task.spawn(function()
+	while not dead do
+		task.wait(1.5) 
+		for _, obj in pairs(workspace:GetDescendants()) do
+			if obj:IsA("ProximityPrompt") then
+				if obj.ActionText == "Box" or obj.Name == "Box" or obj.ObjectText == "Box" or obj.ActionText == "Arrest" then
+					obj.MaxActivationDistance = 30
+				else
+					obj.MaxActivationDistance = 10
+				end
+				obj.RequiresLineOfSight = false
+			end
+		end
+	end
+end)
+
+-- pathfinding params: set slim so we fit down stairs and through doors easily
 local pathParams = {
-	AgentRadius = 3, 
+	AgentRadius = 2, 
 	AgentHeight = 5,
 	AgentCanJump = true,
-	WaypointSpacing = 3 
+	WaypointSpacing = 4
 }
+local path = PathfindingService:CreatePath(pathParams)
 
 local visualsFolder = workspace:FindFirstChild("PathVisuals")
 if not visualsFolder then
@@ -188,79 +273,141 @@ if not visualsFolder then
 	visualsFolder.Parent = workspace
 end
 
--- UPGRADE: Paints a theme-synced continuous line on the floor instead of floating balls
+local partPool = {}
+local jointPool = {}
+
+-- draws the infinite neon trail showing exactly where the bot is going
 local function drawWaypoints(waypoints)
-	for _, child in ipairs(visualsFolder:GetChildren()) do child:Destroy() end
+	local maxWpToDraw = #waypoints -- Uncapped so we can see long-range trails!
 	
-	-- We grab up to 25 points to make a long, fancy trail
-	local maxWpToDraw = math.min(#waypoints, 25) 
-	
-	for i = 1, maxWpToDraw - 1 do 
-		local p1 = waypoints[i].Position
-		local p2 = waypoints[i+1].Position
+	for i = 1, maxWpToDraw do
+		local pos = waypoints[i].Position + Vector3.new(0, 0.5, 0)
+		local joint = jointPool[i]
+		if not joint then
+			joint = Instance.new("Part")
+			joint.Shape = Enum.PartType.Ball
+			joint.Anchored = true; joint.CanCollide = false; joint.CanQuery = false
+			joint.Material = Enum.Material.Neon; joint.Parent = visualsFolder
+			jointPool[i] = joint
+		end
+		joint.Size = Vector3.new(1.2, 1.2, 1.2)
+		joint.Position = pos
 		
-		-- Offset so the path sits beautifully on the floor (AgentHeight/2 approx)
-		local groundOffset = Vector3.new(0, 2.3, 0)
-		p1 = p1 - groundOffset
-		p2 = p2 - groundOffset
-		
-		local distance = (p1 - p2).Magnitude
-		local cframe = CFrame.lookAt(p1, p2) * CFrame.new(0, 0, -distance / 2)
-		
-		local part = Instance.new("Part")
-		part.Anchored = true
-		part.CanCollide = false 
-		part.CanQuery = false
-		part.Material = Enum.Material.Neon
-		
-		-- Width: 0.8, Height (thickness): 0.1, Length: dynamic distance
-		part.Size = Vector3.new(0.8, 0.1, distance) 
-		part.CFrame = cframe
-		part.Parent = visualsFolder
-		
-		-- Syncing color to the current theme! Highlighting jump actions specifically.
-		if waypoints[i+1].Action == Enum.PathWaypointAction.Jump then
-			part.Color = Color3.fromRGB(255, 100, 100)
+		if waypoints[i].Action == Enum.PathWaypointAction.Jump then
+			joint.Color = Color3.fromRGB(255, 100, 100)
 		else
-			part.Color = currentTheme.Accent 
+			joint.Color = currentTheme.Accent
+		end
+		
+		if i < maxWpToDraw then
+			local nextPos = waypoints[i+1].Position + Vector3.new(0, 0.5, 0)
+			local dist = (pos - nextPos).Magnitude
+			local line = partPool[i]
+			if not line then
+				line = Instance.new("Part")
+				line.Shape = Enum.PartType.Cylinder
+				line.Anchored = true; line.CanCollide = false; line.CanQuery = false
+				line.Material = Enum.Material.Neon; line.Parent = visualsFolder
+				partPool[i] = line
+			end
+			line.Size = Vector3.new(dist, 0.8, 0.8) 
+			line.CFrame = CFrame.lookAt(pos, nextPos) * CFrame.new(0, 0, -dist/2) * CFrame.Angles(0, math.rad(90), 0)
+			
+			if waypoints[i+1].Action == Enum.PathWaypointAction.Jump then
+				line.Color = Color3.fromRGB(255, 100, 100)
+			else
+				line.Color = currentTheme.Accent
+			end
 		end
 	end
+	
+	-- cleans up the leftover trail pieces from old paths
+	for i = maxWpToDraw + 1, #jointPool do if jointPool[i] then jointPool[i].Parent = nil end end
+	for i = maxWpToDraw, #partPool do if partPool[i] then partPool[i].Parent = nil end end
 end
 
 local currentWaypoints = {}
 local currentWpIndex = 1
 local isNoclipping = false
 
--- TRUE NOCLIP: Overrides Roblox physics every single frame
+-- noclip loop for when we pop the anti-stuck feature
 RunService.Stepped:Connect(function()
-	if isNoclipping and alive() then
-		local c = player.Character
-		if c then
+	if alive() then
+		local c, h, r = getLatest()
+		if isNoclipping and c then
 			for _, v in ipairs(c:GetDescendants()) do
-				if v:IsA("BasePart") then
-					v.CanCollide = false
-				end
+				if v:IsA("BasePart") then v.CanCollide = false end
 			end
 		end
 	end
 end)
 
--- THREAD 1: Background Path Recalculator
+-- path creation loop: calculates routes actively so we never lose our target
+local lastComputedTargetPos = nil
+local forceRecalculateTimer = 0
+
 task.spawn(function()
 	while not dead do
-		task.wait(0.5) 
-		if running and alive() and not inRing() and not isPausedForSafety then
+		task.wait(0.2) 
+		if running and alive() and not isPausedForSafety then
 			local c, h, r = getLatest()
 			if r then
-				local path = PathfindingService:CreatePath(pathParams)
-				local success = pcall(function() path:ComputeAsync(r.Position, DEST.Position) end)
+				local targetPos = DEST.Position
+				local shouldPath = false
 				
-				if success and path.Status == Enum.PathStatus.Success then
-					local wps = path:GetWaypoints()
-					if #wps > 1 then
-						currentWaypoints = wps
-						currentWpIndex = 2 
-						drawWaypoints(currentWaypoints)
+				if role == "HEALER" then
+					currentHealTarget = getClosestHurtPlayer()
+					if currentHealTarget and currentHealTarget.Character then
+						targetHighlight.Adornee = currentHealTarget.Character
+						local tr = currentHealTarget.Character:FindFirstChild("HumanoidRootPart")
+						if tr then targetPos = tr.Position; shouldPath = true end
+					else
+						targetHighlight.Adornee = nil
+					end
+					
+				elseif role == "ARREST" then
+					-- Normal hostile hunting directly to the target
+					currentArrestTarget = getClosestHostilePlayer()
+					if currentArrestTarget and currentArrestTarget.Character then
+						targetHighlight.Adornee = currentArrestTarget.Character
+						local tr = currentArrestTarget.Character:FindFirstChild("HumanoidRootPart")
+						if tr then targetPos = tr.Position; shouldPath = true end
+					else
+						targetHighlight.Adornee = nil
+					end
+					
+				else
+					-- Farmer and Feeder use DEST as the target point
+					targetHighlight.Adornee = nil
+					if not inRing() then shouldPath = true end
+				end
+				
+				if shouldPath and targetPos then
+					forceRecalculateTimer += 0.2
+					
+					-- actively recalculate if the target moved 2+ studs or enough time passed
+					if not lastComputedTargetPos or (lastComputedTargetPos - targetPos).Magnitude > 2 or forceRecalculateTimer >= 0.8 or #currentWaypoints == 0 then
+						forceRecalculateTimer = 0 
+						local success = pcall(function() path:ComputeAsync(r.Position, targetPos) end)
+						
+						if success and path.Status == Enum.PathStatus.Success then
+							local wps = path:GetWaypoints()
+							if #wps > 1 then
+								lastComputedTargetPos = targetPos
+								currentWaypoints = wps
+								currentWpIndex = 2 
+								drawWaypoints(currentWaypoints)
+							end
+						else
+							-- fallback: if pathing completely fails, draw a straight line to target and walk towards it
+							currentWaypoints = {
+								{Position = r.Position, Action = Enum.PathWaypointAction.Walk},
+								{Position = targetPos, Action = Enum.PathWaypointAction.Walk}
+							}
+							currentWpIndex = 2
+							drawWaypoints(currentWaypoints)
+							pcall(function() h:MoveTo(targetPos) end)
+						end
 					end
 				end
 			end
@@ -268,94 +415,227 @@ task.spawn(function()
 	end
 end)
 
--- THREAD 2: Continuous Mover
+-- physical movement loop: physically makes the humanoid walk node to node
 task.spawn(function()
 	while not dead do
 		task.wait(0.05) 
-		if running and alive() and not inRing() and not isPausedForSafety then
+		if running and alive() and not isPausedForSafety then
+			if (role == "FARMER" or role == "FEEDER") and inRing() then continue end
+			
 			local c, h, r = getLatest()
 			if h and r and #currentWaypoints > 0 and currentWpIndex <= #currentWaypoints then
 				local wp = currentWaypoints[currentWpIndex]
-				
-				if wp.Action == Enum.PathWaypointAction.Jump then
-					h.Jump = true
-				end
-				
+				if wp.Action == Enum.PathWaypointAction.Jump then h.Jump = true end
 				pcall(function() h:MoveTo(wp.Position) end)
 				
 				local dist = (r.Position * Vector3.new(1,0,1) - wp.Position * Vector3.new(1,0,1)).Magnitude
-				if dist < 4.5 then
-					currentWpIndex += 1
-				end
+				if dist < 4.0 then currentWpIndex += 1 end
 			end
 		end
 	end
 end)
 
--- THREAD 3: Bulletproof Anti-Stuck & Wall Breacher
-local lastPos = Vector3.new()
-local stuckTicks = 0
+-- anti stuck system: tracks if we've been stuck in place for 4 seconds
+local checkPos = Vector3.new()
+local timeStuck = 0
 task.spawn(function()
 	while not dead do
-		task.wait(0.5)
-		if running and alive() and not inRing() and not isPausedForSafety then
+		task.wait(1)
+		if running and alive() and not isPausedForSafety then
+			if (role == "FARMER" or role == "FEEDER") and inRing() then continue end
+			
 			local c, h, r = getLatest()
 			if r then
-				local distMoved = (r.Position * Vector3.new(1,0,1) - lastPos * Vector3.new(1,0,1)).Magnitude
-				local distToDest = (r.Position * Vector3.new(1,0,1) - DEST.Position * Vector3.new(1,0,1)).Magnitude
+				local destPos = DEST.Position
+				local isPathingToTarget = false
 				
-				if distMoved < 1.5 and distToDest > 6 then
-					stuckTicks += 1
-					if stuckTicks >= 3 then 
-						setStatus("Stuck! Breaching wall...")
-						h.Jump = true
-						isNoclipping = true
-						
-						pcall(function()
-							r.CFrame = r.CFrame + (r.CFrame.LookVector * 4)
-						end)
-						
-						task.delay(1.5, function() isNoclipping = false end)
-						stuckTicks = 0
-					end
-				else
-					stuckTicks = 0
+				if role == "HEALER" and currentHealTarget and currentHealTarget.Character then
+					local tr = currentHealTarget.Character:FindFirstChild("HumanoidRootPart")
+					if tr then destPos = tr.Position; isPathingToTarget = true end
+				elseif role == "ARREST" and currentArrestTarget and currentArrestTarget.Character then
+					local tr = currentArrestTarget.Character:FindFirstChild("HumanoidRootPart")
+					if tr then destPos = tr.Position; isPathingToTarget = true end
 				end
-				lastPos = r.Position
+				
+				if (role == "HEALER" or role == "ARREST") and not isPathingToTarget then
+					checkPos = r.Position; timeStuck = 0
+					continue
+				end
+				
+				local distMoved = (r.Position * Vector3.new(1,0,1) - checkPos * Vector3.new(1,0,1)).Magnitude
+				local distToDest = (r.Position * Vector3.new(1,0,1) - destPos * Vector3.new(1,0,1)).Magnitude
+				
+				if distToDest > 6 then
+					if distMoved < 2 then
+						timeStuck += 1
+						if timeStuck >= 4 then
+							setStatus("stuck! popping noclip and pushing forward...")
+							h.Jump = true; isNoclipping = true
+							pcall(function() r.CFrame = r.CFrame + (r.CFrame.LookVector * 4) end)
+							task.delay(1.5, function() isNoclipping = false end)
+							timeStuck = 0; checkPos = r.Position
+						end
+					else
+						timeStuck = 0; checkPos = r.Position
+					end
+				end
 			end
 		end
 	end
 end)
 
--- Unified Loop for Farmer/Feeder States
+-- super fast tool equipper so we don't stall out during combat
+local function equipToolTarget(toolName)
+	local char = player.Character
+	if not char then return false end
+	local hum = char:FindFirstChild("Humanoid")
+	local bp = player:FindFirstChild("Backpack")
+	
+	-- check if we're already holding it
+	if char:FindFirstChild(toolName) then return true end
+	
+	if bp and hum then
+		local tool = bp:FindFirstChild(toolName)
+		if tool then
+			hum:EquipTool(tool)
+			task.wait(0.1) -- tiny delay to let the equip process
+			return true
+		end
+	end
+	return false
+end
+
+-- healing logic: spams medkit and quickfix
+local function performHealSequence(targetPlayer)
+	local char = player.Character
+	if not char or not targetPlayer.Character then return end
+	
+	local remoteFolder = ReplicatedStorage:FindFirstChild("Remote")
+	local healRemote = remoteFolder and remoteFolder:FindFirstChild("AttemptHeal")
+	if not healRemote then return end
+
+	local function useTool(toolName)
+		if equipToolTarget(toolName) then
+			local t = 0
+			while t < 1.2 and targetPlayer.Character do
+				local tr = targetPlayer.Character:FindFirstChild("HumanoidRootPart")
+				local hrp = char:FindFirstChild("HumanoidRootPart")
+				if tr and hrp and (hrp.Position - tr.Position).Magnitude <= 10 then 
+					healRemote:FireServer(targetPlayer)
+				end
+				t += task.wait(0.05)
+			end
+		end
+	end
+
+	useTool("Medical Kit")
+	useTool("Quick-Fix")
+
+	local humanoid = char:FindFirstChildOfClass("Humanoid")
+	if humanoid then humanoid:UnequipTools() end
+end
+
+-- brutal arrest logic: 1s taser spam, followed by 1s box spam, over and over
+local function performArrestSequence(targetPlayer)
+	local c, h = getLatest()
+	if not c or not targetPlayer.Character then return end
+	
+	local detainRemote = ReplicatedStorage:FindFirstChild("Remote") and ReplicatedStorage.Remote:FindFirstChild("Detainment")
+	local torso = targetPlayer.Character:FindFirstChild("Torso") or targetPlayer.Character:FindFirstChild("UpperTorso")
+	
+	-- 1. yank out the taser and spam it for 1 second
+	if equipToolTarget("Taser") then
+		local taser = c:FindFirstChild("Taser")
+		local taserEvent = taser and taser:FindFirstChild("TaserEvent")
+		
+		if taserEvent and torso then
+			setStatus("Zapping: " .. targetPlayer.DisplayName)
+			local startTime = tick()
+			while tick() - startTime < 1 and targetPlayer.Character and alive() do
+				task.spawn(function() pcall(function() taserEvent:InvokeServer("Tase", torso) end) end)
+				task.wait(0.1)
+			end
+		end
+	end
+	
+	-- 2. yank out the box and spam it for 1 second
+	if equipToolTarget("Box") and detainRemote then
+		setStatus("Boxing: " .. targetPlayer.DisplayName)
+		local startTime = tick()
+		while tick() - startTime < 1 and targetPlayer.Character and alive() do
+			task.spawn(function() pcall(function() detainRemote:FireServer(targetPlayer) end) end)
+			task.wait(0.1)
+		end
+	end
+	
+	-- unequip everything when we're done looping
+	if h then h:UnequipTools() end
+end
+
+-- main state machine: handles exactly what the bot should be focusing on right now
 task.spawn(function()
 	while not dead do
 		task.wait(0.1) 
-		local success = pcall(function()
+		pcall(function()
 			if running then
 				if not alive() then
-					setStatus("Waiting to respawn...")
-					currentWaypoints = {} 
+					setStatus("waiting to respawn...")
+					currentWaypoints = {}; lastComputedTargetPos = nil; currentWpIndex = 1
 					task.wait(1.5) 
 					return 
 				end
 
 				if role == "FARMER" then
 					if inRing() then
-						currentWaypoints = {}
-						setStatus("in ring — chilling")
+						if #currentWaypoints > 0 then
+							currentWaypoints = {}; lastComputedTargetPos = nil; currentWpIndex = 1; stopCharacter()
+						end
+						setStatus("in ring — idling")
 					else
-						setStatus("pathing to ring...")
+						setStatus("walking to safe zone...")
 					end
 				elseif role == "FEEDER" then
 					if inRing() then
-						currentWaypoints = {}
-						setStatus("Resetting...")
+						currentWaypoints = {}; lastComputedTargetPos = nil; currentWpIndex = 1; stopCharacter()
+						setStatus("resetting character...")
 						local c, h, r = getLatest()
 						if h then h.Health = 0 end
 						task.wait(1)
 					else
-						setStatus("pathing to death...")
+						setStatus("walking to destination...")
+					end
+				elseif role == "HEALER" then
+					if currentHealTarget and currentHealTarget.Character then
+						local tr = currentHealTarget.Character:FindFirstChild("HumanoidRootPart")
+						local c, h, r = getLatest()
+						if r and tr then
+							local dist = (r.Position - tr.Position).Magnitude
+							if dist <= 3 then
+								currentWaypoints = {}; lastComputedTargetPos = nil; currentWpIndex = 1; stopCharacter()
+								performHealSequence(currentHealTarget); task.wait(0.5) 
+							else
+								setStatus("moving to " .. currentHealTarget.DisplayName)
+							end
+						end
+					else
+						setStatus("looking for hurt players...")
+					end
+				elseif role == "ARREST" then
+					if currentArrestTarget and currentArrestTarget.Character then
+						local tr = currentArrestTarget.Character:FindFirstChild("HumanoidRootPart")
+						local c, h, r = getLatest()
+						if r and tr then
+							local dist = (r.Position - tr.Position).Magnitude
+							if dist <= 30 then
+								-- target is within 30 studs: stop moving completely and execute the brutal 2-second combo
+								currentWaypoints = {}; lastComputedTargetPos = nil; currentWpIndex = 1; stopCharacter()
+								performArrestSequence(currentArrestTarget)
+							else
+								setStatus("Pursuing hostile: " .. currentArrestTarget.DisplayName)
+							end
+						end
+					else
+						setStatus("Scanning for hostiles...")
 					end
 				end
 			end
@@ -363,9 +643,8 @@ task.spawn(function()
 	end
 end)
 
-
+-- ui stuff down below (animations, dragging, whitelists, themes)
 local mobileMode = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
-
 local tweenFast = TweenInfo.new(0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 local tweenSmooth = TweenInfo.new(0.35, Enum.EasingStyle.Quart, Enum.EasingDirection.Out)
 
@@ -417,7 +696,6 @@ local function createGlow(parent, size, pos, transparency, rotation)
 		NumberSequenceKeypoint.new(0, 0.18),
 		NumberSequenceKeypoint.new(1, 1)
 	}
-
 	return glow, grad
 end
 
@@ -438,7 +716,6 @@ local function notify(titleText, bodyText)
 	makeCorner(notif, 12)
 
 	local notifGradient = makeGradient(notif, 135)
-
 	local notifStroke = Instance.new("UIStroke")
 	notifStroke.Parent = notif
 	notifStroke.Thickness = 1
@@ -482,12 +759,8 @@ local function notify(titleText, bodyText)
 	notifBody.TextColor3 = currentTheme.SubText
 
 	table.insert(activeNotifications, {
-		Frame = notif,
-		Gradient = notifGradient,
-		Stroke = notifStroke,
-		Accent = accentBar,
-		Title = notifTitle,
-		Body = notifBody
+		Frame = notif, Gradient = notifGradient, Stroke = notifStroke,
+		Accent = accentBar, Title = notifTitle, Body = notifBody
 	})
 
 	tweenObject(notif, TweenInfo.new(0.28, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {Size = UDim2.new(1, 0, 0, 62), BackgroundTransparency = 0})
@@ -506,10 +779,7 @@ local function notify(titleText, bodyText)
 			local closeTween = tweenObject(notif, TweenInfo.new(0.24, Enum.EasingStyle.Quart, Enum.EasingDirection.In), {Size = UDim2.new(1, 0, 0, 0), BackgroundTransparency = 1})
 			closeTween.Completed:Connect(function()
 				for i, data in ipairs(activeNotifications) do
-					if data.Frame == notif then
-						table.remove(activeNotifications, i)
-						break
-					end
+					if data.Frame == notif then table.remove(activeNotifications, i); break end
 				end
 				notif:Destroy()
 			end)
@@ -524,10 +794,12 @@ screenGui.DisplayOrder = 999999999
 screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Global
 screenGui.Parent = playerGui
 
+-- global cleanup trigger for when we rerun the script
 _G.AsylumFarmKill = function()
 	dead = true
 	running = false
 	role = nil
+	if targetHighlight then targetHighlight:Destroy() end
 	if screenGui and screenGui.Parent then screenGui:Destroy() end
 	_G.AsylumFarmKill = nil
 end
@@ -614,7 +886,6 @@ titleFix.Parent = titleBar
 titleFix.BorderSizePixel = 0
 titleFix.Size = UDim2.new(1, 0, 0, 18)
 titleFix.Position = UDim2.new(0, 0, 1, -18)
-
 local topGradient = makeGradient(titleBar, 0)
 
 local title = Instance.new("TextLabel")
@@ -735,10 +1006,36 @@ local feederGrad = makeGradient(feederBtn, 135)
 local feederStroke = Instance.new("UIStroke", feederBtn)
 feederStroke.Thickness = 1
 
+local healerBtn = Instance.new("TextButton")
+healerBtn.Parent = page1
+healerBtn.Size = UDim2.new(0, 120, 0, 42)
+healerBtn.Position = UDim2.new(0, 10, 0, 60)
+healerBtn.Font = Enum.Font.GothamBold
+healerBtn.TextSize = 13
+healerBtn.Text = "HEALER"
+healerBtn.AutoButtonColor = false
+makeCorner(healerBtn, 8)
+local healerGrad = makeGradient(healerBtn, 135)
+local healerStroke = Instance.new("UIStroke", healerBtn)
+healerStroke.Thickness = 1
+
+local arrestBtn = Instance.new("TextButton")
+arrestBtn.Parent = page1
+arrestBtn.Size = UDim2.new(0, 120, 0, 42)
+arrestBtn.Position = UDim2.new(0, 140, 0, 60)
+arrestBtn.Font = Enum.Font.GothamBold
+arrestBtn.TextSize = 13
+arrestBtn.Text = "AUTO ARREST"
+arrestBtn.AutoButtonColor = false
+makeCorner(arrestBtn, 8)
+local arrestGrad = makeGradient(arrestBtn, 135)
+local arrestStroke = Instance.new("UIStroke", arrestBtn)
+arrestStroke.Thickness = 1
+
 local statusLbl = Instance.new("TextLabel")
 statusLbl.Parent = page1
 statusLbl.BackgroundTransparency = 1
-statusLbl.Position = UDim2.new(0, 12, 0, 68)
+statusLbl.Position = UDim2.new(0, 12, 0, 110)
 statusLbl.Size = UDim2.new(1, -20, 0, 20)
 statusLbl.Font = Enum.Font.Gotham
 statusLbl.TextSize = 13
@@ -748,49 +1045,57 @@ statusLbl.Text = "Status: idle"
 local GREEN_ACTIVE = Color3.fromRGB(38, 155, 65)
 
 updateFarmBtns = function()
-	if role == "FARMER" and running then
-		farmerGrad.Color = ColorSequence.new(GREEN_ACTIVE)
-		feederGrad.Color = currentTheme.Button
-		farmerBtn.Text = "FARMER ●"
-		feederBtn.Text = "FEEDER"
-	elseif role == "FEEDER" and running then
-		feederGrad.Color = ColorSequence.new(GREEN_ACTIVE)
-		farmerGrad.Color = currentTheme.Button
-		feederBtn.Text = "FEEDER ●"
-		farmerBtn.Text = "FARMER"
-	else
-		farmerGrad.Color = currentTheme.Button
-		feederGrad.Color = currentTheme.Button
-		farmerBtn.Text = "FARMER"
-		feederBtn.Text = "FEEDER"
+	farmerGrad.Color = currentTheme.Button
+	feederGrad.Color = currentTheme.Button
+	healerGrad.Color = currentTheme.Button
+	arrestGrad.Color = currentTheme.Button
+	farmerBtn.Text = "FARMER"
+	feederBtn.Text = "FEEDER"
+	healerBtn.Text = "HEALER"
+	arrestBtn.Text = "AUTO ARREST"
+
+	if running then
+		if role == "FARMER" then 
+			farmerGrad.Color = ColorSequence.new(GREEN_ACTIVE)
+			farmerBtn.Text = "FARMER ●"
+		elseif role == "FEEDER" then 
+			feederGrad.Color = ColorSequence.new(GREEN_ACTIVE)
+			feederBtn.Text = "FEEDER ●"
+		elseif role == "HEALER" then 
+			healerGrad.Color = ColorSequence.new(GREEN_ACTIVE)
+			healerBtn.Text = "HEALER ●"
+		elseif role == "ARREST" then 
+			arrestGrad.Color = ColorSequence.new(GREEN_ACTIVE)
+			arrestBtn.Text = "ARRESTING ●" 
+		end
 	end
 end
 
-setStatus = function(txt)
-	if statusLbl then statusLbl.Text = "Status: " .. txt end
+setStatus = function(txt) if statusLbl then statusLbl.Text = "Status: " .. txt end end
+
+local function resetBotState()
+	running = false; role = nil; targetHighlight.Adornee = nil
+	currentWaypoints = {}; lastComputedTargetPos = nil; currentWpIndex = 1
+	stopCharacter(); setStatus("Idle")
 end
 
 farmerBtn.MouseButton1Click:Connect(function()
-	if role == "FARMER" and running then
-		running = false; role = nil
-		stopCharacter()
-		setStatus("idle")
-	else
-		role = "FARMER"; running = true
-		setStatus("starting")
-	end
+	if role == "FARMER" and running then resetBotState() else role = "FARMER"; running = true; setStatus("Initializing...") end
 	updateFarmBtns()
 end)
 
 feederBtn.MouseButton1Click:Connect(function()
-	if role == "FEEDER" and running then
-		running = false; role = nil
-		stopCharacter()
-		setStatus("idle")
-	else
-		role = "FEEDER"; running = true
-		setStatus("starting")
-	end
+	if role == "FEEDER" and running then resetBotState() else role = "FEEDER"; running = true; setStatus("Initializing...") end
+	updateFarmBtns()
+end)
+
+healerBtn.MouseButton1Click:Connect(function()
+	if role == "HEALER" and running then resetBotState() else role = "HEALER"; running = true; setStatus("Initializing Auto-Heal..."); removeDoors() end
+	updateFarmBtns()
+end)
+
+arrestBtn.MouseButton1Click:Connect(function()
+	if role == "ARREST" and running then resetBotState() else role = "ARREST"; running = true; setStatus("Initializing Auto-Arrest..."); removeDoors() end
 	updateFarmBtns()
 end)
 
@@ -858,32 +1163,10 @@ themePage.Size = UDim2.new(1, 0, 1, 0)
 themePage.BackgroundTransparency = 1
 themePage.Visible = false
 
-local themeHeader = Instance.new("Frame")
-themeHeader.Parent = themePage
-themeHeader.Size = UDim2.new(1, 0, 0, 44)
-themeHeader.BorderSizePixel = 0
-makeCorner(themeHeader, 12)
-
-local themeHeaderGradient = makeGradient(themeHeader, 135)
-local themeHeaderStroke = Instance.new("UIStroke")
-themeHeaderStroke.Thickness = 1
-themeHeaderStroke.Parent = themeHeader
-
-local themeHeaderText = Instance.new("TextLabel")
-themeHeaderText.Parent = themeHeader
-themeHeaderText.BackgroundTransparency = 1
-themeHeaderText.Position = UDim2.new(0, 10, 0, 13)
-themeHeaderText.Size = UDim2.new(1, -20, 0, 17)
-themeHeaderText.Font = Enum.Font.GothamBold
-themeHeaderText.TextSize = 14
-themeHeaderText.TextXAlignment = Enum.TextXAlignment.Left
-themeHeaderText.Text = "Theme Selector"
-
--- Adjusted size to fit Transparency Slider below it
 local themeScroll = Instance.new("ScrollingFrame")
 themeScroll.Parent = themePage
-themeScroll.Position = UDim2.new(0, 0, 0, 54)
-themeScroll.Size = UDim2.new(1, 0, 1, -164)
+themeScroll.Position = UDim2.new(0, 0, 0, 0)
+themeScroll.Size = UDim2.new(1, 0, 1, -100)
 themeScroll.BackgroundTransparency = 1
 themeScroll.BorderSizePixel = 0
 themeScroll.ScrollBarThickness = 4
@@ -893,14 +1176,13 @@ themeScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
 local themeGrid = Instance.new("UIGridLayout")
 themeGrid.Parent = themeScroll
 themeGrid.CellPadding = UDim2.new(0, 8, 0, 8)
-themeGrid.CellSize = UDim2.new(0.5, -4, 0, 40)
+themeGrid.CellSize = UDim2.new(0.5, -4, 0, 34) 
 themeGrid.SortOrder = Enum.SortOrder.LayoutOrder
 
--- UPGRADE: Glass Transparency Slider
 local sliderContainer = Instance.new("Frame")
 sliderContainer.Parent = themePage
-sliderContainer.Position = UDim2.new(0, 0, 1, -102)
-sliderContainer.Size = UDim2.new(1, 0, 0, 48)
+sliderContainer.Position = UDim2.new(0, 0, 1, -90)
+sliderContainer.Size = UDim2.new(1, 0, 0, 44)
 sliderContainer.BorderSizePixel = 0
 makeCorner(sliderContainer, 12)
 local sliderGradient = makeGradient(sliderContainer, 135)
@@ -911,18 +1193,18 @@ sliderStroke.Parent = sliderContainer
 local sliderTitle = Instance.new("TextLabel")
 sliderTitle.Parent = sliderContainer
 sliderTitle.BackgroundTransparency = 1
-sliderTitle.Position = UDim2.new(0, 10, 0, 6)
+sliderTitle.Position = UDim2.new(0, 10, 0, 4)
 sliderTitle.Size = UDim2.new(1, -20, 0, 16)
 sliderTitle.Font = Enum.Font.GothamMedium
 sliderTitle.TextSize = 13
 sliderTitle.TextXAlignment = Enum.TextXAlignment.Left
-sliderTitle.Text = "Glass Transparency: 0%"
+sliderTitle.Text = "Transparency: 0%"
 
 local sliderTrack = Instance.new("Frame")
 sliderTrack.Parent = sliderContainer
-sliderTrack.BackgroundColor3 = Color3.fromRGB(40, 40, 50) -- Base track color
+sliderTrack.BackgroundColor3 = Color3.fromRGB(40, 40, 50) 
 sliderTrack.BorderSizePixel = 0
-sliderTrack.Position = UDim2.new(0, 10, 0, 28)
+sliderTrack.Position = UDim2.new(0, 10, 0, 26)
 sliderTrack.Size = UDim2.new(1, -20, 0, 6)
 makeCorner(sliderTrack, 3)
 
@@ -943,8 +1225,8 @@ makeCorner(sliderKnob, 7)
 
 local preview = Instance.new("Frame")
 preview.Parent = themePage
-preview.Position = UDim2.new(0, 0, 1, -46)
-preview.Size = UDim2.new(1, 0, 0, 40)
+preview.Position = UDim2.new(0, 0, 1, -38)
+preview.Size = UDim2.new(1, 0, 0, 38)
 preview.BorderSizePixel = 0
 makeCorner(preview, 12)
 
@@ -972,181 +1254,93 @@ local categories = {
 	{Name = "Settings", Page = themePage, Title = "Settings"}
 }
 
--- Slider Transparency Sync Function
-local function updateTransparency(val)
+local function applyGlobalTransparency(val)
 	val = math.clamp(val, 0, 100)
 	local alpha = val / 100
-
-	mainFrame.BackgroundTransparency = alpha * 0.45
-	sidebar.BackgroundTransparency = alpha * 0.5
-	contentFrame.BackgroundTransparency = alpha * 0.5
 	
-	sliderTitle.Text = "Glass Transparency: " .. math.floor(val) .. "%"
+	sliderTitle.Text = "Transparency: " .. math.floor(val) .. "%"
 	sliderFill.Size = UDim2.new(alpha, 0, 1, 0)
 	sliderKnob.Position = UDim2.new(alpha, -7, 0.5, -7)
+
+	local function setTrans(inst)
+		if inst:IsA("GuiObject") then
+			if inst:GetAttribute("OrigBg") == nil then inst:SetAttribute("OrigBg", inst.BackgroundTransparency) end
+			inst.BackgroundTransparency = inst:GetAttribute("OrigBg") + ((1 - inst:GetAttribute("OrigBg")) * (alpha * 0.90))
+		end
+		if inst:IsA("TextLabel") or inst:IsA("TextButton") or inst:IsA("TextBox") then
+			if inst:GetAttribute("OrigTxt") == nil then inst:SetAttribute("OrigTxt", inst.TextTransparency) end
+			inst.TextTransparency = inst:GetAttribute("OrigTxt") + ((1 - inst:GetAttribute("OrigTxt")) * (alpha * 0.2))
+		end
+		if inst:IsA("UIStroke") then
+			if inst:GetAttribute("OrigStr") == nil then inst:SetAttribute("OrigStr", inst.Transparency) end
+			inst.Transparency = inst:GetAttribute("OrigStr") + ((1 - inst:GetAttribute("OrigStr")) * (alpha * 0.4))
+		end
+	end
+
+	setTrans(mainFrame)
+	for _, child in ipairs(mainFrame:GetDescendants()) do setTrans(child) end
 end
 
--- Handling Slider Drag
 local draggingSlider = false
 sliderKnob.InputBegan:Connect(function(input)
-	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-		draggingSlider = true
-	end
+	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then draggingSlider = true end
 end)
 UserInputService.InputEnded:Connect(function(input)
-	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-		draggingSlider = false
-	end
+	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then draggingSlider = false end
 end)
 UserInputService.InputChanged:Connect(function(input)
 	if draggingSlider and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
 		local relativeX = math.clamp(input.Position.X - sliderTrack.AbsolutePosition.X, 0, sliderTrack.AbsoluteSize.X)
 		local percentage = relativeX / sliderTrack.AbsoluteSize.X
-		updateTransparency(percentage * 100)
+		applyGlobalTransparency(percentage * 100)
 	end
 end)
 
 local function createCategoryButton(data, index)
 	local button = Instance.new("TextButton")
-	button.Parent = sidebar
-	button.Size = UDim2.new(1, 0, 0, 40)
-	button.BorderSizePixel = 0
-	button.Text = ""
-	button.AutoButtonColor = false
-	button.LayoutOrder = index
+	button.Parent = sidebar; button.Size = UDim2.new(1, 0, 0, 40); button.BorderSizePixel = 0; button.Text = ""; button.AutoButtonColor = false; button.LayoutOrder = index
 	makeCorner(button, 12)
-
-	local gradient = makeGradient(button, 135)
-	local stroke = Instance.new("UIStroke")
-	stroke.Thickness = 1
-	stroke.Parent = button
-
-	local indicator = Instance.new("Frame")
-	indicator.Size = UDim2.new(0, 0, 0, 18) 
-	indicator.Position = UDim2.new(0, 4, 0.5, -9)
-	indicator.BorderSizePixel = 0
-	indicator.Parent = button
-	makeCorner(indicator, 4)
-
-	local label = Instance.new("TextLabel")
-	label.Parent = button
-	label.BackgroundTransparency = 1
-	label.Position = UDim2.new(0, 14, 0, 12)
-	label.Size = UDim2.new(1, -20, 0, 16)
-	label.Font = Enum.Font.GothamBold
-	label.TextSize = 13
-	label.TextXAlignment = Enum.TextXAlignment.Left
-	label.Text = data.Name
-
-	categoryButtons[index] = {
-		Button = button,
-		Gradient = gradient,
-		Stroke = stroke,
-		Label = label,
-		Indicator = indicator
-	}
-
+	local gradient = makeGradient(button, 135); local stroke = Instance.new("UIStroke"); stroke.Thickness = 1; stroke.Parent = button
+	local indicator = Instance.new("Frame"); indicator.Size = UDim2.new(0, 0, 0, 18); indicator.Position = UDim2.new(0, 4, 0.5, -9); indicator.BorderSizePixel = 0; indicator.Parent = button; makeCorner(indicator, 4)
+	local label = Instance.new("TextLabel"); label.Parent = button; label.BackgroundTransparency = 1; label.Position = UDim2.new(0, 14, 0, 12); label.Size = UDim2.new(1, -20, 0, 16); label.Font = Enum.Font.GothamBold; label.TextSize = 13; label.TextXAlignment = Enum.TextXAlignment.Left; label.Text = data.Name
+	categoryButtons[index] = {Button = button, Gradient = gradient, Stroke = stroke, Label = label, Indicator = indicator}
 	return button
 end
 
 local function createThemeButton(themeName)
 	local themeData = Themes[themeName]
-	
-	local button = Instance.new("TextButton")
-	button.Name = themeName .. "Button"
-	button.Text = themeName
-	button.Font = Enum.Font.GothamSemibold
-	button.TextSize = 13
-	button.AutoButtonColor = false
-	button.BorderSizePixel = 0
-	button.TextXAlignment = Enum.TextXAlignment.Left
-	button.Parent = themeScroll
+	local button = Instance.new("TextButton"); button.Name = themeName .. "Button"; button.Text = themeName; button.Font = Enum.Font.GothamSemibold; button.TextSize = 13; button.AutoButtonColor = false; button.BorderSizePixel = 0; button.TextXAlignment = Enum.TextXAlignment.Left; button.Parent = themeScroll
 	makeCorner(button, 10)
-
-	local padding = Instance.new("UIPadding")
-	padding.PaddingLeft = UDim.new(0, 36)
-	padding.Parent = button
-	
-	local colorTint = Instance.new("Frame")
-	colorTint.Size = UDim2.new(1, 0, 1, 0)
-	colorTint.BackgroundColor3 = themeData.Accent
-	colorTint.BackgroundTransparency = 0.88
-	colorTint.BorderSizePixel = 0
-	colorTint.Parent = button
-	makeCorner(colorTint, 10)
-	
-	local dot = Instance.new("Frame")
-	dot.Size = UDim2.new(0, 12, 0, 12)
-	dot.Position = UDim2.new(0, -23, 0.5, -6)
-	dot.BackgroundColor3 = themeData.Main.Keypoints[#themeData.Main.Keypoints].Value
-	dot.BorderSizePixel = 0
-	dot.Parent = button
-	makeCorner(dot, 6)
-	
-	local dotUIStroke = Instance.new("UIStroke")
-	dotUIStroke.Color = themeData.Accent
-	dotUIStroke.Thickness = 1.5
-	dotUIStroke.Parent = dot
-
-	local gradient = makeGradient(button, 135)
-	local stroke = Instance.new("UIStroke")
-	stroke.Thickness = 1
-	stroke.Parent = button
-
-	themeButtons[themeName] = {
-		Button = button,
-		Gradient = gradient,
-		Stroke = stroke,
-		Padding = padding,
-		DotStroke = dotUIStroke,
-		Tint = colorTint
-	}
-
+	local padding = Instance.new("UIPadding"); padding.PaddingLeft = UDim.new(0, 36); padding.Parent = button
+	local colorTint = Instance.new("Frame"); colorTint.Size = UDim2.new(1, 0, 1, 0); colorTint.BackgroundColor3 = themeData.Accent; colorTint.BackgroundTransparency = 0.88; colorTint.BorderSizePixel = 0; colorTint.Parent = button; makeCorner(colorTint, 10)
+	local dot = Instance.new("Frame"); dot.Size = UDim2.new(0, 12, 0, 12); dot.Position = UDim2.new(0, -23, 0.5, -6); dot.BackgroundColor3 = themeData.Main.Keypoints[#themeData.Main.Keypoints].Value; dot.BorderSizePixel = 0; dot.Parent = button; makeCorner(dot, 6)
+	local dotUIStroke = Instance.new("UIStroke"); dotUIStroke.Color = themeData.Accent; dotUIStroke.Thickness = 1.5; dotUIStroke.Parent = dot
+	local gradient = makeGradient(button, 135); local stroke = Instance.new("UIStroke"); stroke.Thickness = 1; stroke.Parent = button
+	themeButtons[themeName] = {Button = button, Gradient = gradient, Stroke = stroke, Padding = padding, DotStroke = dotUIStroke, Tint = colorTint}
 	return button
 end
 
-for i, data in ipairs(categories) do
-	createCategoryButton(data, i)
-end
+for i, data in ipairs(categories) do createCategoryButton(data, i) end
+for themeName in pairs(Themes) do createThemeButton(themeName) end
 
-for themeName in pairs(Themes) do
-	createThemeButton(themeName)
-end
-
-local function refreshWhitelistCanvas()
-	task.defer(function()
-		whitelistScroll.CanvasSize = UDim2.new(0, 0, 0, whitelistLayout.AbsoluteContentSize.Y + 8)
-	end)
-end
+local function refreshWhitelistCanvas() task.defer(function() whitelistScroll.CanvasSize = UDim2.new(0, 0, 0, whitelistLayout.AbsoluteContentSize.Y + 8) end) end
 
 local function matchesSearch(targetPlayer, query)
 	if query == "" then return true end
 	local loweredQuery = string.lower(query)
-	local playerName = string.lower(targetPlayer.Name)
-	local displayName = string.lower(targetPlayer.DisplayName)
-	return string.find(playerName, loweredQuery, 1, true) ~= nil
-		or string.find(displayName, loweredQuery, 1, true) ~= nil
+	return string.find(string.lower(targetPlayer.Name), loweredQuery, 1, true) ~= nil or string.find(string.lower(targetPlayer.DisplayName), loweredQuery, 1, true) ~= nil
 end
 
 local function updateWhitelistButtonTheme(button, whitelisted, stroke)
 	if whitelisted then
-		button.BackgroundColor3 = currentTheme.Accent
-		button.TextColor3 = Color3.fromRGB(255, 255, 255)
-		stroke.Color = currentTheme.Accent2
+		button.BackgroundColor3 = currentTheme.Accent; button.TextColor3 = Color3.fromRGB(255, 255, 255); stroke.Color = currentTheme.Accent2
 	else
-		button.BackgroundColor3 = currentTheme.Button.Keypoints[1].Value
-		button.TextColor3 = currentTheme.Text
-		stroke.Color = currentTheme.Stroke
+		button.BackgroundColor3 = currentTheme.Button.Keypoints[1].Value; button.TextColor3 = currentTheme.Text; stroke.Color = currentTheme.Stroke
 	end
 end
 
 local function refreshPlayerList()
-	for _, child in ipairs(whitelistScroll:GetChildren()) do
-		if child:IsA("TextButton") or child:IsA("TextLabel") then
-			child:Destroy()
-		end
-	end
-
+	for _, child in ipairs(whitelistScroll:GetChildren()) do if child:IsA("TextButton") or child:IsA("TextLabel") then child:Destroy() end end
 	table.clear(whitelistButtons)
 
 	local query = string.gsub(searchBox.Text or "", "^%s*(.-)%s*$", "%1")
@@ -1155,498 +1349,213 @@ local function refreshPlayerList()
 	for _, targetPlayer in ipairs(Players:GetPlayers()) do
 		if targetPlayer ~= player and matchesSearch(targetPlayer, query) then
 			layoutOrder += 1
-
-			local button = Instance.new("TextButton")
-			button.Parent = whitelistScroll
-			button.Size = UDim2.new(1, 0, 0, 42)
-			button.BorderSizePixel = 0
-			button.AutoButtonColor = false
-			button.LayoutOrder = layoutOrder
-			button.Font = Enum.Font.GothamBold
-			button.TextSize = 13
-			button.TextWrapped = false
-			makeCorner(button, 10)
-
-			local stroke = Instance.new("UIStroke")
-			stroke.Parent = button
-			stroke.Thickness = 1
+			local button = Instance.new("TextButton"); button.Parent = whitelistScroll; button.Size = UDim2.new(1, 0, 0, 42); button.BorderSizePixel = 0; button.AutoButtonColor = false; button.LayoutOrder = layoutOrder; button.Font = Enum.Font.GothamBold; button.TextSize = 13; makeCorner(button, 10)
+			local stroke = Instance.new("UIStroke"); stroke.Parent = button; stroke.Thickness = 1
 
 			local function updateButton()
 				local stateText = isWhitelisted(targetPlayer) and "WHITELISTED" or "DETECT"
 				button.Text = targetPlayer.Name .. "  |  " .. targetPlayer.DisplayName .. "  |  " .. stateText
 				updateWhitelistButtonTheme(button, isWhitelisted(targetPlayer), stroke)
 			end
-
 			updateButton()
 
-			button.MouseEnter:Connect(function()
-				if not isWhitelisted(targetPlayer) then
-					tweenObject(button, tweenFast, {BackgroundColor3 = currentTheme.ButtonHover.Keypoints[1].Value})
-				end
-			end)
-
+			button.MouseEnter:Connect(function() if not isWhitelisted(targetPlayer) then tweenObject(button, tweenFast, {BackgroundColor3 = currentTheme.ButtonHover.Keypoints[1].Value}) end end)
 			button.MouseLeave:Connect(function() updateButton() end)
-
 			button.MouseButton1Click:Connect(function()
 				if isWhitelisted(targetPlayer) then
-					WHITELIST[targetPlayer.Name] = nil
-					detectedPlayers[targetPlayer] = nil
-					notify("Whitelist", targetPlayer.Name .. " removed from whitelist")
+					WHITELIST[targetPlayer.Name] = nil; detectedPlayers[targetPlayer] = nil; notify("Whitelist", targetPlayer.Name .. " removed from whitelist")
 				else
-					WHITELIST[targetPlayer.Name] = true
-					detectedPlayers[targetPlayer] = nil
-					notify("Whitelist", targetPlayer.Name .. " added to whitelist")
+					WHITELIST[targetPlayer.Name] = true; detectedPlayers[targetPlayer] = nil; notify("Whitelist", targetPlayer.Name .. " added to whitelist")
 				end
 				updateButton()
 			end)
-
-			whitelistButtons[targetPlayer] = {
-				Button = button,
-				Update = updateButton
-			}
+			whitelistButtons[targetPlayer] = {Button = button, Update = updateButton}
 		end
 	end
 
 	if layoutOrder == 0 then
-		local emptyLabel = Instance.new("TextLabel")
-		emptyLabel.Parent = whitelistScroll
-		emptyLabel.BackgroundTransparency = 1
-		emptyLabel.Size = UDim2.new(1, 0, 0, 40)
-		emptyLabel.LayoutOrder = 1
-		emptyLabel.Font = Enum.Font.Gotham
-		emptyLabel.TextSize = 13
-		emptyLabel.Text = "No matching players found"
-		emptyLabel.TextWrapped = true
-		emptyLabel.TextColor3 = currentTheme.SubText
+		local emptyLabel = Instance.new("TextLabel"); emptyLabel.Parent = whitelistScroll; emptyLabel.BackgroundTransparency = 1; emptyLabel.Size = UDim2.new(1, 0, 0, 40); emptyLabel.LayoutOrder = 1; emptyLabel.Font = Enum.Font.Gotham; emptyLabel.TextSize = 13; emptyLabel.Text = "No matching players found"; emptyLabel.TextColor3 = currentTheme.SubText
 	end
-
 	refreshWhitelistCanvas()
 end
 
 whitelistLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(refreshWhitelistCanvas)
 searchBox:GetPropertyChangedSignal("Text"):Connect(refreshPlayerList)
-
-Players.PlayerAdded:Connect(function()
-	task.wait(0.15)
-	refreshPlayerList()
-end)
-
-Players.PlayerRemoving:Connect(function(targetPlayer)
-	detectedPlayers[targetPlayer] = nil
-	WHITELIST[targetPlayer.Name] = nil
-	task.wait(0.15)
-	refreshPlayerList()
-end)
+Players.PlayerAdded:Connect(function() task.wait(0.15); refreshPlayerList() end)
+Players.PlayerRemoving:Connect(function(targetPlayer) detectedPlayers[targetPlayer] = nil; WHITELIST[targetPlayer.Name] = nil; task.wait(0.15); refreshPlayerList() end)
 
 local selectedCategory = 1
-
 local function setCategoryVisual(index, hovering)
 	local data = categoryButtons[index]
 	if not data then return end
-
 	if selectedCategory == index then
 		data.Gradient.Color = ColorSequence.new{ColorSequenceKeypoint.new(0, currentTheme.Accent), ColorSequenceKeypoint.new(1, currentTheme.Accent2)}
-		data.Stroke.Color = currentTheme.Accent2
-		data.Label.TextColor3 = Color3.fromRGB(255, 255, 255)
-		data.Indicator.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
-		tweenObject(data.Indicator, tweenFast, {Size = UDim2.new(0, 4, 0, 18)})
-		tweenObject(data.Label, tweenFast, {Position = UDim2.new(0, 18, 0, 12)})
+		data.Stroke.Color = currentTheme.Accent2; data.Label.TextColor3 = Color3.fromRGB(255, 255, 255); data.Indicator.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+		tweenObject(data.Indicator, tweenFast, {Size = UDim2.new(0, 4, 0, 18)}); tweenObject(data.Label, tweenFast, {Position = UDim2.new(0, 18, 0, 12)})
 	else
-		data.Gradient.Color = hovering and currentTheme.ButtonHover or currentTheme.Button
-		data.Stroke.Color = currentTheme.Stroke
-		data.Label.TextColor3 = currentTheme.Text
-		tweenObject(data.Indicator, tweenFast, {Size = UDim2.new(0, 0, 0, 18)})
-		tweenObject(data.Label, tweenFast, {Position = UDim2.new(0, 14, 0, 12)})
+		data.Gradient.Color = hovering and currentTheme.ButtonHover or currentTheme.Button; data.Stroke.Color = currentTheme.Stroke; data.Label.TextColor3 = currentTheme.Text
+		tweenObject(data.Indicator, tweenFast, {Size = UDim2.new(0, 0, 0, 18)}); tweenObject(data.Label, tweenFast, {Position = UDim2.new(0, 14, 0, 12)})
 	end
 end
 
 local function setThemeButtonVisual(selectedThemeName, buttonName, hovering)
-	local selectedThemeData = Themes[selectedThemeName]
-	local btnData = themeButtons[buttonName]
+	local selectedThemeData = Themes[selectedThemeName]; local btnData = themeButtons[buttonName]
 	if not btnData then return end
-
 	if selectedThemeName == buttonName then
 		btnData.Gradient.Color = ColorSequence.new{ColorSequenceKeypoint.new(0, selectedThemeData.Accent), ColorSequenceKeypoint.new(1, selectedThemeData.Accent2)}
-		btnData.Stroke.Color = selectedThemeData.Accent2
-		btnData.Button.TextColor3 = Color3.fromRGB(255, 255, 255)
-		btnData.DotStroke.Color = Color3.fromRGB(255, 255, 255)
-		btnData.Tint.BackgroundTransparency = 0.5 
+		btnData.Stroke.Color = selectedThemeData.Accent2; btnData.Button.TextColor3 = Color3.fromRGB(255, 255, 255); btnData.DotStroke.Color = Color3.fromRGB(255, 255, 255); btnData.Tint.BackgroundTransparency = 0.5 
 	else
-		btnData.Gradient.Color = hovering and selectedThemeData.ButtonHover or selectedThemeData.Button
-		btnData.Stroke.Color = selectedThemeData.Stroke
-		btnData.Button.TextColor3 = selectedThemeData.Text
-		btnData.DotStroke.Color = Themes[buttonName].Accent
-		btnData.Tint.BackgroundTransparency = 0.88 
+		btnData.Gradient.Color = hovering and selectedThemeData.ButtonHover or selectedThemeData.Button; btnData.Stroke.Color = selectedThemeData.Stroke; btnData.Button.TextColor3 = selectedThemeData.Text; btnData.DotStroke.Color = Themes[buttonName].Accent; btnData.Tint.BackgroundTransparency = 0.88 
 	end
 end
 
 local function switchCategory(index)
 	selectedCategory = index
-
-	for i, data in ipairs(categories) do
-		data.Page.Visible = (i == index)
-		setCategoryVisual(i, false)
-	end
-
-	pageTitle.Text = categories[index].Title
-	
-	titleUnderline.Size = UDim2.new(0, 0, 0, 3)
-	tweenObject(titleUnderline, TweenInfo.new(0.4, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {Size = UDim2.new(0, 32, 0, 3)})
+	for i, data in ipairs(categories) do data.Page.Visible = (i == index); setCategoryVisual(i, false) end
+	pageTitle.Text = categories[index].Title; RunService.RenderStepped:Wait()
+	local titleWidth = pageTitle.TextBounds.X; titleUnderline.Size = UDim2.new(0, 0, 0, 3)
+	tweenObject(titleUnderline, TweenInfo.new(0.4, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {Size = UDim2.new(0, titleWidth, 0, 3)})
 end
 
+-- the master theme applier function
 local function applyTheme(themeName)
 	local theme = Themes[themeName]
 	if not theme then return end
 
-	currentThemeName = themeName
-	currentTheme = theme
-
-	mainGradient.Color = theme.Main
-	topGradient.Color = theme.Topbar
-	titleFix.BackgroundColor3 = theme.Topbar.Keypoints[#theme.Topbar.Keypoints].Value
-	sidebarGradient.Color = theme.Main
-	contentGradient.Color = theme.Main
-	mainStroke.Color = theme.Stroke
-	sidebarStroke.Color = theme.Stroke
-	contentStroke.Color = theme.Stroke
-	toggleGradient.Color = theme.Button
-	toggleStroke.Color = theme.Stroke
-	searchGradient.Color = theme.Button
-	searchStroke.Color = theme.Stroke
-	whitelistListGradient.Color = theme.Main
-	whitelistListStroke.Color = theme.Stroke
-	themeHeaderGradient.Color = theme.Topbar
-	themeHeaderStroke.Color = theme.Stroke
-	titleUnderline.BackgroundColor3 = theme.Accent
-
-	innerGradient.Color = ColorSequence.new{ColorSequenceKeypoint.new(0, theme.Accent2), ColorSequenceKeypoint.new(1, theme.Accent)}
-	title.TextColor3 = theme.Text
-	pageTitle.TextColor3 = theme.Text
-	searchBox.TextColor3 = theme.Text
-	searchBox.PlaceholderColor3 = theme.SubText
-	themeHeaderText.TextColor3 = theme.Text
-	previewLabel.TextColor3 = theme.Text
-	toggleButton.TextColor3 = theme.Text
-	
-	-- Sync Slider Colors
-	sliderGradient.Color = theme.Topbar
-	sliderStroke.Color = theme.Stroke
-	sliderTitle.TextColor3 = theme.Text
-	sliderFill.BackgroundColor3 = theme.Accent
-	sliderKnob.BackgroundColor3 = theme.Text
-
-	if role ~= "FARMER" then farmerGrad.Color = theme.Button end
-	if role ~= "FEEDER" then feederGrad.Color = theme.Button end
-	farmerStroke.Color = theme.Stroke
-	feederStroke.Color = theme.Stroke
-	farmerBtn.TextColor3 = theme.Text
-	feederBtn.TextColor3 = theme.Text
-	statusLbl.TextColor3 = theme.SubText
-
-	previewGradient.Color = ColorSequence.new{ColorSequenceKeypoint.new(0, theme.Accent), ColorSequenceKeypoint.new(1, theme.Accent2)}
-	previewStroke.Color = theme.Accent2
-	previewLabel.Text = "Current Theme: " .. themeName
-
-	glow1Gradient.Color = ColorSequence.new{ColorSequenceKeypoint.new(0, theme.Glow), ColorSequenceKeypoint.new(1, theme.Accent2)}
-	glow2Gradient.Color = ColorSequence.new{ColorSequenceKeypoint.new(0, theme.Accent), ColorSequenceKeypoint.new(1, theme.Glow)}
-	glow1.BackgroundColor3 = theme.Glow
-	glow2.BackgroundColor3 = theme.Accent
+	currentThemeName = themeName; currentTheme = theme
+	mainGradient.Color = theme.Main; topGradient.Color = theme.Topbar; titleFix.BackgroundColor3 = theme.Topbar.Keypoints[#theme.Topbar.Keypoints].Value; sidebarGradient.Color = theme.Main; contentGradient.Color = theme.Main; mainStroke.Color = theme.Stroke; sidebarStroke.Color = theme.Stroke; contentStroke.Color = theme.Stroke; toggleGradient.Color = theme.Button; toggleStroke.Color = theme.Stroke; searchGradient.Color = theme.Button; searchStroke.Color = theme.Stroke; whitelistListGradient.Color = theme.Main; whitelistListStroke.Color = theme.Stroke; titleUnderline.BackgroundColor3 = theme.Accent; innerGradient.Color = ColorSequence.new{ColorSequenceKeypoint.new(0, theme.Accent2), ColorSequenceKeypoint.new(1, theme.Accent)}
+	title.TextColor3 = theme.Text; pageTitle.TextColor3 = theme.Text; searchBox.TextColor3 = theme.Text; searchBox.PlaceholderColor3 = theme.SubText; previewLabel.TextColor3 = theme.Text; toggleButton.TextColor3 = theme.Text; sliderGradient.Color = theme.Topbar; sliderStroke.Color = theme.Stroke; sliderTitle.TextColor3 = theme.Text; sliderFill.BackgroundColor3 = theme.Accent; sliderKnob.BackgroundColor3 = theme.Text
+	if role ~= "FARMER" then farmerGrad.Color = theme.Button end; if role ~= "FEEDER" then feederGrad.Color = theme.Button end; if role ~= "HEALER" then healerGrad.Color = theme.Button end; if role ~= "ARREST" then arrestGrad.Color = theme.Button end
+	farmerStroke.Color = theme.Stroke; feederStroke.Color = theme.Stroke; healerStroke.Color = theme.Stroke; arrestStroke.Color = theme.Stroke; farmerBtn.TextColor3 = theme.Text; feederBtn.TextColor3 = theme.Text; healerBtn.TextColor3 = theme.Text; arrestBtn.TextColor3 = theme.Text; statusLbl.TextColor3 = theme.SubText
+	previewGradient.Color = ColorSequence.new{ColorSequenceKeypoint.new(0, theme.Accent), ColorSequenceKeypoint.new(1, theme.Accent2)}; previewStroke.Color = theme.Accent2; previewLabel.Text = "Current Theme: " .. themeName
+	glow1Gradient.Color = ColorSequence.new{ColorSequenceKeypoint.new(0, theme.Glow), ColorSequenceKeypoint.new(1, theme.Accent2)}; glow2Gradient.Color = ColorSequence.new{ColorSequenceKeypoint.new(0, theme.Accent), ColorSequenceKeypoint.new(1, theme.Glow)}; glow1.BackgroundColor3 = theme.Glow; glow2.BackgroundColor3 = theme.Accent
 
 	for i = 1, #categories do setCategoryVisual(i, false) end
 	for name in pairs(themeButtons) do setThemeButtonVisual(themeName, name, false) end
-
 	for _, notifData in ipairs(activeNotifications) do
-		if notifData.Frame and notifData.Frame.Parent then
-			notifData.Gradient.Color = theme.Button
-			notifData.Stroke.Color = theme.Stroke
-			notifData.Accent.BackgroundColor3 = theme.Accent
-			notifData.Title.TextColor3 = theme.Text
-			notifData.Body.TextColor3 = theme.SubText
-		end
+		if notifData.Frame and notifData.Frame.Parent then notifData.Gradient.Color = theme.Button; notifData.Stroke.Color = theme.Stroke; notifData.Accent.BackgroundColor3 = theme.Accent; notifData.Title.TextColor3 = theme.Text; notifData.Body.TextColor3 = theme.SubText end
 	end
-
-	for _, data in pairs(whitelistButtons) do
-		if data.Update then data.Update() end
+	for _, data in pairs(whitelistButtons) do if data.Update then data.Update() end end
+	
+	-- syncs the path visualizer to the new theme!
+	if visualsFolder then 
+		for _, part in ipairs(visualsFolder:GetChildren()) do 
+			if part:IsA("BasePart") and part.Color ~= Color3.fromRGB(255, 100, 100) then 
+				part.Color = theme.Accent 
+			end 
+		end 
 	end
-
+	if targetHighlight then targetHighlight.FillColor = theme.Accent end
+	
 	refreshPlayerList()
+	local percentage = (math.clamp(tonumber(string.match(sliderTitle.Text, "%d+")) or 0, 0, 100)) / 100
+	applyGlobalTransparency(percentage * 100)
 end
 
 for i, data in ipairs(categoryButtons) do
-	data.Button.MouseEnter:Connect(function() setCategoryVisual(i, true) end)
-	data.Button.MouseLeave:Connect(function() setCategoryVisual(i, false) end)
-	data.Button.MouseButton1Click:Connect(function() switchCategory(i) end)
+	data.Button.MouseEnter:Connect(function() setCategoryVisual(i, true) end); data.Button.MouseLeave:Connect(function() setCategoryVisual(i, false) end); data.Button.MouseButton1Click:Connect(function() switchCategory(i) end)
 end
-
 for name, data in pairs(themeButtons) do
-	data.Button.MouseEnter:Connect(function()
-		setThemeButtonVisual(currentThemeName, name, true)
-		tweenObject(data.Padding, tweenFast, {PaddingLeft = UDim.new(0, 42)})
-	end)
-
-	data.Button.MouseLeave:Connect(function()
-		setThemeButtonVisual(currentThemeName, name, false)
-		tweenObject(data.Padding, tweenFast, {PaddingLeft = UDim.new(0, 36)})
-	end)
-
+	data.Button.MouseEnter:Connect(function() setThemeButtonVisual(currentThemeName, name, true); tweenObject(data.Padding, tweenFast, {PaddingLeft = UDim.new(0, 42)}) end)
+	data.Button.MouseLeave:Connect(function() setThemeButtonVisual(currentThemeName, name, false); tweenObject(data.Padding, tweenFast, {PaddingLeft = UDim.new(0, 36)}) end)
 	data.Button.MouseButton1Click:Connect(function()
-		applyTheme(name)
-		local baseSize = mobileMode and UDim2.new(0, 480, 0, 320) or UDim2.new(0, 600, 0, 360)
-		tweenObject(mainFrame, TweenInfo.new(0.16, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
-			Size = UDim2.new(0, baseSize.X.Offset + 12, 0, baseSize.Y.Offset + 10)
-		})
-		task.delay(0.16, function()
-			tweenObject(mainFrame, TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
-				Size = baseSize
-			})
-		end)
+		applyTheme(name); local baseSize = mobileMode and UDim2.new(0, 480, 0, 320) or UDim2.new(0, 600, 0, 360)
+		tweenObject(mainFrame, TweenInfo.new(0.16, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Size = UDim2.new(0, baseSize.X.Offset + 12, 0, baseSize.Y.Offset + 10)})
+		task.delay(0.16, function() tweenObject(mainFrame, TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Size = baseSize}) end)
 	end)
 end
 
-local isOpen = true
-local openSize = mainFrame.Size
-
--- UPGRADE: Glows properly fade out when opening/closing
+local isOpen = true; local openSize = mainFrame.Size
 local function openGui()
-	mainFrame.Visible = true
-	glowHolder.Visible = true
-	mainFrame.Size = UDim2.new(0, 0, 0, 0)
-	
-	glow1.BackgroundTransparency = 1
-	glow2.BackgroundTransparency = 1
-
-	tweenObject(mainFrame, tweenSmooth, {Size = openSize})
-	tweenObject(glow1, tweenSmooth, {BackgroundTransparency = 0.86})
-	tweenObject(glow2, tweenSmooth, {BackgroundTransparency = 0.90})
-
-	isOpen = true
+	mainFrame.Visible = true; glowHolder.Visible = true; mainFrame.Size = UDim2.new(0, 0, 0, 0); glow1.BackgroundTransparency = 1; glow2.BackgroundTransparency = 1
+	tweenObject(mainFrame, tweenSmooth, {Size = openSize}); tweenObject(glow1, tweenSmooth, {BackgroundTransparency = 0.86}); tweenObject(glow2, tweenSmooth, {BackgroundTransparency = 0.90}); isOpen = true
 end
-
 local function closeGui()
-	local closeTween = tweenObject(mainFrame, tweenSmooth, {Size = UDim2.new(0, 0, 0, 0)})
-	
-	-- Fade out the glows simultaneously to eliminate the delayed circle glitch
-	tweenObject(glow1, tweenSmooth, {BackgroundTransparency = 1})
-	tweenObject(glow2, tweenSmooth, {BackgroundTransparency = 1})
-
-	closeTween.Completed:Connect(function()
-		if not isOpen then
-			mainFrame.Visible = false
-			glowHolder.Visible = false
-		end
-	end)
-
-	isOpen = false
+	local closeTween = tweenObject(mainFrame, tweenSmooth, {Size = UDim2.new(0, 0, 0, 0)}); tweenObject(glow1, tweenSmooth, {BackgroundTransparency = 1}); tweenObject(glow2, tweenSmooth, {BackgroundTransparency = 1})
+	closeTween.Completed:Connect(function() if not isOpen then mainFrame.Visible = false; glowHolder.Visible = false end end); isOpen = false
 end
 
 toggleButton.MouseButton1Click:Connect(function()
 	local baseSize = mobileMode and UDim2.new(0, 130, 0, 50) or UDim2.new(0, 120, 0, 44)
 	tweenObject(toggleButton, tweenFast, {Size = UDim2.new(baseSize.X.Scale, baseSize.X.Offset - 4, baseSize.Y.Scale, baseSize.Y.Offset - 4)})
 	task.delay(0.08, function() tweenObject(toggleButton, tweenFast, {Size = baseSize}) end)
-
-	if isOpen then
-		closeGui()
-	else
-		openGui()
-	end
+	if isOpen then closeGui() else openGui() end
 end)
 
-local draggingToggle = false
-local dragToggleInput
-local dragToggleStart
-local toggleStartPos
-
+local draggingToggle, dragToggleInput, dragToggleStart, toggleStartPos = false, nil, nil, nil
 toggleButton.InputBegan:Connect(function(input)
-	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-		draggingToggle = true
-		dragToggleStart = input.Position
-		toggleStartPos = toggleButton.Position
-		input.Changed:Connect(function()
-			if input.UserInputState == Enum.UserInputState.End then
-				draggingToggle = false
-			end
-		end)
-	end
+	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then draggingToggle = true; dragToggleStart = input.Position; toggleStartPos = toggleButton.Position; input.Changed:Connect(function() if input.UserInputState == Enum.UserInputState.End then draggingToggle = false end end) end
 end)
+toggleButton.InputChanged:Connect(function(input) if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then dragToggleInput = input end end)
+UserInputService.InputChanged:Connect(function(input) if draggingToggle and input == dragToggleInput then local delta = input.Position - dragToggleStart; toggleButton.Position = UDim2.new(toggleStartPos.X.Scale, toggleStartPos.X.Offset + delta.X, toggleStartPos.Y.Scale, toggleStartPos.Y.Offset + delta.Y) end end)
 
-toggleButton.InputChanged:Connect(function(input)
-	if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
-		dragToggleInput = input
-	end
-end)
-
-UserInputService.InputChanged:Connect(function(input)
-	if draggingToggle and input == dragToggleInput then
-		local delta = input.Position - dragToggleStart
-		toggleButton.Position = UDim2.new(
-			toggleStartPos.X.Scale, toggleStartPos.X.Offset + delta.X,
-			toggleStartPos.Y.Scale, toggleStartPos.Y.Offset + delta.Y
-		)
-	end
-end)
-
-local draggingMain = false
-local dragMainStart
-local mainStartPos
-local mainDragInput
-
+local draggingMain, dragMainStart, mainStartPos, mainDragInput = false, nil, nil, nil
 titleBar.InputBegan:Connect(function(input)
-	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-		draggingMain = true
-		dragMainStart = input.Position
-		mainStartPos = mainFrame.Position
-		input.Changed:Connect(function()
-			if input.UserInputState == Enum.UserInputState.End then
-				draggingMain = false
-			end
-		end)
-	end
+	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then draggingMain = true; dragMainStart = input.Position; mainStartPos = mainFrame.Position; input.Changed:Connect(function() if input.UserInputState == Enum.UserInputState.End then draggingMain = false end end) end
 end)
-
-titleBar.InputChanged:Connect(function(input)
-	if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
-		mainDragInput = input
-	end
-end)
-
-UserInputService.InputChanged:Connect(function(input)
-	if draggingMain and input == mainDragInput then
-		local delta = input.Position - dragMainStart
-		mainFrame.Position = UDim2.new(
-			mainStartPos.X.Scale, mainStartPos.X.Offset + delta.X,
-			mainStartPos.Y.Scale, mainStartPos.Y.Offset + delta.Y
-		)
-		glowHolder.Position = mainFrame.Position
-	end
-end)
+titleBar.InputChanged:Connect(function(input) if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then mainDragInput = input end end)
+UserInputService.InputChanged:Connect(function(input) if draggingMain and input == mainDragInput then local delta = input.Position - dragMainStart; mainFrame.Position = UDim2.new(mainStartPos.X.Scale, mainStartPos.X.Offset + delta.X, mainStartPos.Y.Scale, mainStartPos.Y.Offset + delta.Y); glowHolder.Position = mainFrame.Position end end)
 
 local function getRaycastParams()
-	local params = RaycastParams.new()
-	params.FilterType = Enum.RaycastFilterType.Exclude
-	params.FilterDescendantsInstances = {}
-	params.IgnoreWater = true
-	return params
+	local params = RaycastParams.new(); params.FilterType = Enum.RaycastFilterType.Exclude; params.FilterDescendantsInstances = {}; params.IgnoreWater = true; return params
 end
-
 local function playerIsInsideWallAwareArea(otherHRP)
 	if not detectionPosition or not otherHRP then return false end
-
-	local origin = detectionPosition + Vector3.new(0, 2, 0)
-	local target = otherHRP.Position + Vector3.new(0, 2, 0)
-	local offset = target - origin
-	local distance = offset.Magnitude
-
+	local origin = detectionPosition + Vector3.new(0, 2, 0); local target = otherHRP.Position + Vector3.new(0, 2, 0); local offset = target - origin; local distance = offset.Magnitude
 	if distance > DETECTION_RANGE then return false end
-
-	local params = getRaycastParams()
-	local result = workspace:Raycast(origin, offset, params)
-
-	if result then
-		local hitInstance = result.Instance
-		if hitInstance and otherHRP:IsDescendantOf(hitInstance.Parent) then
-			return true
-		end
-		return false
-	end
-
+	local result = workspace:Raycast(origin, offset, getRaycastParams())
+	if result then local hitInstance = result.Instance; if hitInstance and otherHRP:IsDescendantOf(hitInstance.Parent) then return true end; return false end
 	return true
 end
 
-task.spawn(function()
-	task.wait(0.35)
-	notify("Detection", "Detection active at fixed location")
-	notify("Detection", "Range: " .. tostring(DETECTION_RANGE))
-end)
+task.spawn(function() task.wait(0.35); notify("Detection", "Detection active at fixed location"); notify("Detection", "Range: " .. tostring(DETECTION_RANGE)) end)
 
-RunService.RenderStepped:Connect(function(deltaTime)
+RunService.Heartbeat:Connect(function(deltaTime)
+	if role == "HEALER" or role == "ARREST" then return end
 	if not detectionEnabled or not detectionPosition then return end
-
-	lastCheck += deltaTime
-	if lastCheck < DETECTION_CHECK_DELAY then return end
-	lastCheck = 0
-
+	lastCheck += deltaTime; if lastCheck < DETECTION_CHECK_DELAY then return end; lastCheck = 0
 	local dangerFound = false
-
 	for _, targetPlayer in ipairs(Players:GetPlayers()) do
 		if targetPlayer ~= player then
 			if isWhitelisted(targetPlayer) then
-				if detectedPlayers[targetPlayer] then
-					detectedPlayers[targetPlayer] = nil
-				end
+				if detectedPlayers[targetPlayer] then detectedPlayers[targetPlayer] = nil end
 			else
 				local otherCharacter = targetPlayer.Character
 				if otherCharacter then
-					local otherHRP = otherCharacter:FindFirstChild("HumanoidRootPart")
-					local otherHumanoid = otherCharacter:FindFirstChildOfClass("Humanoid")
-
+					local otherHRP = otherCharacter:FindFirstChild("HumanoidRootPart"); local otherHumanoid = otherCharacter:FindFirstChildOfClass("Humanoid")
 					if otherHRP and otherHumanoid and otherHumanoid.Health > 0 then
 						local inside = playerIsInsideWallAwareArea(otherHRP)
-
 						if inside then
 							dangerFound = true
-							if not detectedPlayers[targetPlayer] then
-								detectedPlayers[targetPlayer] = true
-								notify("Player Detected", targetPlayer.Name .. " entered! Terminating...")
-							end
-						elseif not inside and detectedPlayers[targetPlayer] then
-							detectedPlayers[targetPlayer] = nil
-							notify("Player Left", targetPlayer.Name .. " left the area")
-						end
+							if not detectedPlayers[targetPlayer] then detectedPlayers[targetPlayer] = true; notify("Player Detected", targetPlayer.Name .. " entered! Terminating...") end
+						elseif not inside and detectedPlayers[targetPlayer] then detectedPlayers[targetPlayer] = nil; notify("Player Left", targetPlayer.Name .. " left the area") end
 					else
-						if detectedPlayers[targetPlayer] then
-							detectedPlayers[targetPlayer] = nil
-						end
+						if detectedPlayers[targetPlayer] then detectedPlayers[targetPlayer] = nil end
 					end
 				else
-					if detectedPlayers[targetPlayer] then
-						detectedPlayers[targetPlayer] = nil
-					end
+					if detectedPlayers[targetPlayer] then detectedPlayers[targetPlayer] = nil end
 				end
 			end
 		end
 	end
-
 	if dangerFound then
 		if running then
-			savedRole = role
-			running = false
-			isPausedForSafety = true
-			updateFarmBtns()
-			setStatus("TERMINATING")
-			
-			local c, h, r = getLatest()
-			if h then
-				h.Health = 0
-			end
+			savedRole = role; running = false; isPausedForSafety = true; currentWaypoints = {}; lastComputedTargetPos = nil; currentWpIndex = 1; stopCharacter(); updateFarmBtns(); setStatus("TERMINATING")
+			local c, h = getLatest(); if h then h.Health = 0 end
 		end
 	else
 		if isPausedForSafety and not dangerFound then
-			isPausedForSafety = false
-			notify("Safe", "Area clear. Resuming in 5s...")
-			task.delay(5, function()
-				if not isPausedForSafety and savedRole then 
-					role = savedRole
-					running = true
-					updateFarmBtns()
-					setStatus("Resumed")
-				end
-			end)
+			isPausedForSafety = false; notify("Safe", "Area clear. Resuming in 5s...")
+			task.delay(5, function() if not isPausedForSafety and savedRole then role = savedRole; running = true; updateFarmBtns(); setStatus("Resumed") end end)
 		end
 	end
 end)
 
 task.spawn(function()
 	while screenGui.Parent do
-		tweenObject(glow1, TweenInfo.new(2.6, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), {Position = UDim2.new(0.3, 0, 0.32, 0)})
-		tweenObject(glow2, TweenInfo.new(2.6, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), {Position = UDim2.new(0.7, 0, 0.68, 0)})
-		task.wait(2.6)
-
-		tweenObject(glow1, TweenInfo.new(2.6, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), {Position = UDim2.new(0.25, 0, 0.26, 0)})
-		tweenObject(glow2, TweenInfo.new(2.6, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), {Position = UDim2.new(0.76, 0, 0.74, 0)})
-		task.wait(2.6)
+		tweenObject(glow1, TweenInfo.new(2.6, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), {Position = UDim2.new(0.3, 0, 0.32, 0)}); tweenObject(glow2, TweenInfo.new(2.6, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), {Position = UDim2.new(0.7, 0, 0.68, 0)}); task.wait(2.6)
+		tweenObject(glow1, TweenInfo.new(2.6, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), {Position = UDim2.new(0.25, 0, 0.26, 0)}); tweenObject(glow2, TweenInfo.new(2.6, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), {Position = UDim2.new(0.76, 0, 0.74, 0)}); task.wait(2.6)
 	end
 end)
 
-switchCategory(1)
-refreshPlayerList()
-applyTheme("Dark")
+switchCategory(1); refreshPlayerList(); applyTheme("Dark")
