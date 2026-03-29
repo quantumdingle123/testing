@@ -71,8 +71,7 @@ local isPausedForSafety = false
 local savedRole = nil
 local currentHealTarget = nil 
 local currentArrestTarget = nil
-local lastTaserTime = 0
-local TASER_COOLDOWN = 15
+local isInteracting = false 
 local aimbotTarget = nil
 
 -- placeholders for ui functions that are built further down
@@ -177,12 +176,6 @@ local function inRing()
 	return math.abs(relative.X) <= halfSize.X and math.abs(relative.Y) <= halfSize.Y and math.abs(relative.Z) <= halfSize.Z
 end
 
--- completely halts character movement on the spot
-local function stopCharacter()
-	local c, h, r = getLatest()
-	if h and r then pcall(function() h:MoveTo(r.Position) end) end
-end
-
 -- peeks at a player's overhead UI
 local function isHostile(targetChar)
 	local pGui = player:FindFirstChild("PlayerGui")
@@ -277,6 +270,23 @@ RunService.RenderStepped:Connect(function()
 		if r and targetHrp then
 			camera.CFrame = CFrame.lookAt(camera.CFrame.Position, targetHrp.Position)
 			r.CFrame = CFrame.lookAt(r.Position, Vector3.new(targetHrp.Position.X, r.Position.Y, targetHrp.Position.Z))
+		end
+	end
+end)
+
+-- EXTENDED REACH: Forces interaction buttons to show from 30 studs away
+task.spawn(function()
+	while not dead do
+		task.wait(1.5) 
+		for _, obj in pairs(workspace:GetDescendants()) do
+			if obj:IsA("ProximityPrompt") then
+				if obj.ActionText == "Box" or obj.Name == "Box" or obj.ObjectText == "Box" or obj.ActionText == "Arrest" or obj.ActionText == "Heal" then
+					obj.MaxActivationDistance = 30
+				else
+					obj.MaxActivationDistance = 10
+				end
+				obj.RequiresLineOfSight = false
+			end
 		end
 	end
 end)
@@ -404,7 +414,6 @@ local forceRecalculateTimer = 0
 task.spawn(function()
 	while not dead do
 		task.wait(0.2) 
-		-- Perfectly unblocked logic
 		if running and alive() and not isPausedForSafety then
 			local c, h, r = getLatest()
 			if r then
@@ -461,15 +470,37 @@ task.spawn(function()
 	end
 end)
 
--- physical legs loop (NEVER STOPS WALKING UNTIL 2.5 STUDS)
+-- physical legs loop (NEVER STOPS RUNNING UNTIL 2.5 STUDS OR DEST)
 task.spawn(function()
 	while not dead do
 		task.wait(0.05) 
 		if running and alive() and not isPausedForSafety then
-			if (role == "FARMER" or role == "FEEDER") and inRing() then continue end
 			
 			local c, h, r = getLatest()
 			if h and r then
+				
+				local haltMovement = false
+				if role == "HEALER" and currentHealTarget and currentHealTarget.Character then
+					local tr = currentHealTarget.Character:FindFirstChild("HumanoidRootPart")
+					if tr and (r.Position - tr.Position).Magnitude <= 2.5 then
+						haltMovement = true
+					end
+				elseif role == "ARREST" and currentArrestTarget and currentArrestTarget.Character then
+					local tr = currentArrestTarget.Character:FindFirstChild("HumanoidRootPart")
+					if tr and (r.Position - tr.Position).Magnitude <= 2.5 then
+						haltMovement = true
+					end
+				elseif role == "FARMER" or role == "FEEDER" then
+					local distToDest = (r.Position - DEST.Position).Magnitude
+					if distToDest <= 3.5 or inRing() then
+						haltMovement = true
+					end
+				end
+				
+				if haltMovement then
+					pcall(function() h:MoveTo(r.Position) end) 
+					continue
+				end
 				
 				local params = RaycastParams.new()
 				params.FilterType = Enum.RaycastFilterType.Exclude
@@ -484,7 +515,6 @@ task.spawn(function()
 					local wp = currentWaypoints[currentWpIndex]
 					if wp.Action == Enum.PathWaypointAction.Jump then h.Jump = true end
 					
-					-- Unconditionally move towards the next path node
 					pcall(function() h:MoveTo(wp.Position) end)
 					
 					local dist = (r.Position * Vector3.new(1,0,1) - wp.Position * Vector3.new(1,0,1)).Magnitude
@@ -502,14 +532,15 @@ task.spawn(function()
 	while not dead do
 		task.wait(1)
 		if running and alive() and not isPausedForSafety then
-			if (role == "FARMER" or role == "FEEDER") and inRing() then continue end
-			
 			local c, h, r = getLatest()
 			if r then
 				local destPos = DEST.Position
 				local isPathingToTarget = false
 				
-				if role == "HEALER" and currentHealTarget and currentHealTarget.Character then
+				if role == "FARMER" or role == "FEEDER" then
+					local distToDest = (r.Position - DEST.Position).Magnitude
+					if inRing() or distToDest <= 3.5 then continue end
+				elseif role == "HEALER" and currentHealTarget and currentHealTarget.Character then
 					local tr = currentHealTarget.Character:FindFirstChild("HumanoidRootPart")
 					if tr then destPos = tr.Position; isPathingToTarget = true end
 				elseif role == "ARREST" and currentArrestTarget and currentArrestTarget.Character then
@@ -570,43 +601,104 @@ local function equipToolTarget(toolName)
 end
 
 -- =================================================================================
--- THE INSTANT 2.5-STUD REMOTE EXECUTION (No Fake Holding, Just Results)
+-- THE BULLETPROOF INTERACTION SYSTEM (20 Stud Reach + 3s Backup)
 -- =================================================================================
-local function performInstantHeal(targetPlayer)
+local function holdInteraction(targetChar, toolName, remoteName, targetPlayer)
+	local char = player.Character
+	if not char or not targetChar then return false end
+	
+	local success, actualToolName = equipToolTarget(toolName)
+	if success then
+		
+		task.wait(0.25)
+		
+		local tool = char:FindFirstChild(actualToolName)
+		local prompt = nil
+		
+		for _, obj in pairs(targetChar:GetDescendants()) do
+			if obj:IsA("ProximityPrompt") then 
+				prompt = obj 
+				break 
+			end
+		end
+		
+		local remote = ReplicatedStorage:FindFirstChild("Remote") and ReplicatedStorage.Remote:FindFirstChild(remoteName)
+		local startRemote = ReplicatedStorage:FindFirstChild("Remote") and ReplicatedStorage.Remote:FindFirstChild("StartHeal")
+		
+		local startTime = tick()
+		local maxFailSafe = tick() 
+		local remoteFired = false
+		
+		if prompt then
+			prompt.MaxActivationDistance = 25
+			prompt.RequiresLineOfSight = false
+			pcall(function() prompt:InputHoldBegin() end)
+		end
+		if tool then pcall(function() tool:Activate() end) end
+
+		while isToolReady(actualToolName) and targetChar.Parent and alive() do
+			local tr = targetChar:FindFirstChild("HumanoidRootPart")
+			local hrp = char:FindFirstChild("HumanoidRootPart")
+			
+			if not tr or not hrp or (hrp.Position - tr.Position).Magnitude > 20 then
+				break 
+			end
+			
+			if tick() - maxFailSafe > 8 then break end 
+			
+			if not remoteFired and (tick() - startTime >= 3) then
+				remoteFired = true
+				if toolName ~= "Box" and startRemote and targetPlayer then
+					task.spawn(function() pcall(function() startRemote:FireServer(targetPlayer) end) end)
+				end
+				if remote and targetPlayer then
+					task.spawn(function() pcall(function() remote:FireServer(targetPlayer) end) end)
+				end
+			end
+			
+			task.wait(0.1)
+		end
+		
+		if prompt then pcall(function() prompt:InputHoldEnd() end) end
+		if tool then pcall(function() tool:Deactivate() end) end
+		return true
+	end
+	return false
+end
+
+-- the dynamically switching healing sequence
+local function performHealSequence(targetPlayer)
 	local char = player.Character
 	if not char or not targetPlayer.Character then return end
-	
-	local startRemote = ReplicatedStorage:FindFirstChild("Remote") and ReplicatedStorage.Remote:FindFirstChild("StartHeal")
-	local attemptRemote = ReplicatedStorage:FindFirstChild("Remote") and ReplicatedStorage.Remote:FindFirstChild("AttemptHeal")
 	
 	aimbotTarget = targetPlayer.Character
 	
 	if isToolReady("Medical Kit") then
-		equipToolTarget("Medical Kit")
-		if startRemote then pcall(function() startRemote:FireServer(targetPlayer) end) end
-		if attemptRemote then pcall(function() attemptRemote:FireServer(targetPlayer) end) end
+		holdInteraction(targetPlayer.Character, "Medical Kit", "AttemptHeal", targetPlayer)
 	elseif isToolReady("Quick-Fix") then
-		equipToolTarget("Quick-Fix")
-		if startRemote then pcall(function() startRemote:FireServer(targetPlayer) end) end
-		if attemptRemote then pcall(function() attemptRemote:FireServer(targetPlayer) end) end
+		holdInteraction(targetPlayer.Character, "Quick-Fix", "AttemptHeal", targetPlayer)
+	else
+		task.wait(0.2)
 	end
 
 	aimbotTarget = nil
+	local humanoid = char:FindFirstChildOfClass("Humanoid")
+	if humanoid then humanoid:UnequipTools() end
 end
 
-local function performInstantArrest(targetPlayer)
-	local c = player.Character
+-- the legit, interruptible arrest sequence
+local function performArrestSequence(targetPlayer)
+	local c, h = getLatest()
 	if not c or not targetPlayer.Character then return end
 	
 	aimbotTarget = targetPlayer.Character
 	
 	if isToolReady("Box") then
-		equipToolTarget("Box")
-		local detainRemote = ReplicatedStorage:FindFirstChild("Remote") and ReplicatedStorage.Remote:FindFirstChild("Detainment")
-		if detainRemote then pcall(function() detainRemote:FireServer(targetPlayer) end) end
+		holdInteraction(targetPlayer.Character, "Box", "Detainment", targetPlayer)
 	end
 	
 	aimbotTarget = nil
+	if h then h:UnequipTools() end
 end
 
 -- the brain of the bot
@@ -624,21 +716,36 @@ task.spawn(function()
 				end
 
 				if role == "FARMER" then
+					local distToDest = 999
+					local c, h, r = getLatest()
+					if r then distToDest = (r.Position - DEST.Position).Magnitude end
+					
 					if inRing() then
 						if #currentWaypoints > 0 then
-							currentWaypoints = {}; lastComputedTargetPos = nil; currentWpIndex = 1; stopCharacter()
+							currentWaypoints = {}; lastComputedTargetPos = nil; currentWpIndex = 1
 						end
 						setStatus("in ring — idling")
+					elseif distToDest <= 3.5 then
+						if #currentWaypoints > 0 then
+							currentWaypoints = {}; lastComputedTargetPos = nil; currentWpIndex = 1
+						end
+						setStatus("at destination — waiting")
 					else
 						setStatus("walking to safe zone...")
 					end
 				elseif role == "FEEDER" then
+					local distToDest = 999
+					local c, h, r = getLatest()
+					if r then distToDest = (r.Position - DEST.Position).Magnitude end
+					
 					if inRing() then
-						currentWaypoints = {}; lastComputedTargetPos = nil; currentWpIndex = 1; stopCharacter()
+						currentWaypoints = {}; lastComputedTargetPos = nil; currentWpIndex = 1
 						setStatus("resetting character...")
-						local c, h, r = getLatest()
 						if h then h.Health = 0 end
 						task.wait(1)
+					elseif distToDest <= 3.5 then
+						currentWaypoints = {}; lastComputedTargetPos = nil; currentWpIndex = 1
+						setStatus("waiting to be farmed...")
 					else
 						setStatus("walking to destination...")
 					end
@@ -649,11 +756,14 @@ task.spawn(function()
 						if r and tr then
 							local dist = (r.Position - tr.Position).Magnitude
 							
-							-- INSTANT TRIGGER: Fires remote immediately when basically touching the player (2.5 studs)
-							if dist <= 2.5 then
-								task.spawn(function()
-									pcall(function() performInstantHeal(currentHealTarget) end)
-								end)
+							if dist <= 20 then
+								if not isInteracting then
+									isInteracting = true
+									task.spawn(function()
+										pcall(function() performHealSequence(currentHealTarget) end)
+										isInteracting = false 
+									end)
+								end
 								setStatus("Healing: " .. currentHealTarget.DisplayName)
 							else
 								setStatus("Chasing: " .. currentHealTarget.DisplayName)
@@ -669,15 +779,17 @@ task.spawn(function()
 						if r and tr then
 							local dist = (r.Position - tr.Position).Magnitude
 							
-							-- INSTANT TRIGGER: Fires box remote immediately when basically touching the player (2.5 studs)
-							if dist <= 2.5 then
-								task.spawn(function()
-									pcall(function() performInstantArrest(currentArrestTarget) end)
-								end)
+							if dist <= 20 then
+								if not isInteracting then
+									isInteracting = true
+									task.spawn(function()
+										pcall(function() performArrestSequence(currentArrestTarget) end)
+										isInteracting = false
+									end)
+								end
 								setStatus("Arresting: " .. currentArrestTarget.DisplayName)
 							else
-								-- Shoot taser on the run while outside of 2.5 studs!
-								if dist <= 30 and isToolReady("Taser") then
+								if dist <= 30 and isToolReady("Taser") and not isInteracting then
 									task.spawn(function()
 										if equipToolTarget("Taser") then
 											local taser = c:FindFirstChild("Taser")
@@ -1140,7 +1252,7 @@ end
 setStatus = function(txt) if statusLbl then statusLbl.Text = "Status: " .. txt end end
 
 local function resetBotState()
-	running = false; role = nil; targetHighlight.Adornee = nil
+	running = false; role = nil; targetHighlight.Adornee = nil; isInteracting = false
 	currentWaypoints = {}; lastComputedTargetPos = nil; currentWpIndex = 1
 	aimbotTarget = nil
 	drawWaypoints({}) 
@@ -1606,7 +1718,7 @@ RunService.Heartbeat:Connect(function(deltaTime)
 	end
 	if dangerFound then
 		if running then
-			savedRole = role; running = false; isPausedForSafety = true; currentWaypoints = {}; lastComputedTargetPos = nil; currentWpIndex = 1; stopCharacter(); drawWaypoints({}); updateFarmBtns(); setStatus("TERMINATING")
+			savedRole = role; running = false; isPausedForSafety = true; currentWaypoints = {}; lastComputedTargetPos = nil; currentWpIndex = 1; updateFarmBtns(); setStatus("TERMINATING")
 			local c, h = getLatest(); if h then h.Health = 0 end
 		end
 	else
