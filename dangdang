@@ -1,6 +1,6 @@
 if _G.AsylumFarmKill then _G.AsylumFarmKill() end
 
--- services we need
+-- grab all the standard roblox services we need
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
 local TweenService = game:GetService("TweenService")
@@ -9,26 +9,26 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local VirtualUser = game:GetService("VirtualUser")
 local PathfindingService = game:GetService("PathfindingService")
 
--- player vars
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
+local camera = workspace.CurrentCamera
 
--- fake some clicks so we don't get kicked for being afk
+-- simulate dummy clicks so roblox doesn't kick us for being afk
 player.Idled:Connect(function()
 	VirtualUser:CaptureController()
 	VirtualUser:ClickButton2(Vector2.new())
 end)
 
--- the spot we walk to for the feeder role
+-- the exact coordinate we walk to for the feeder role
 local DEST = CFrame.new(-10.160541534423828, 255.27276611328125, -611.555908203125)
 
--- ring setup stuff
+-- safe zone ring setup
 local RING_POSITION = Vector3.new(-19.12, 256.01, -595.00)
 local RING_SIZE = Vector3.new(26, 12, 26)
 local RING_ROTATION_Y = -30
 local ringCFrame = CFrame.new(RING_POSITION) * CFrame.Angles(0, math.rad(RING_ROTATION_Y), 0)
 
--- drawing the safe zone box so we can actually see it
+-- drawing the safe zone box so we can actually see where it is
 local ringVisualsFolder = workspace:FindFirstChild("RingVisuals")
 if not ringVisualsFolder then
 	ringVisualsFolder = Instance.new("Folder")
@@ -53,7 +53,7 @@ if not ringVisualsFolder then
 	selectionBox.Parent = boxPart
 end
 
--- highlight for the player we are currently targeting
+-- the neon highlight that glows on whatever player we are currently chasing
 local targetHighlight = Instance.new("Highlight")
 targetHighlight.Name = "TargetHighlight"
 targetHighlight.FillColor = Color3.fromRGB(86, 220, 156) 
@@ -63,7 +63,7 @@ targetHighlight.OutlineTransparency = 0.2
 targetHighlight.Parent = ringVisualsFolder
 targetHighlight.Adornee = nil
 
--- states and target tracking
+-- master states and target trackers
 local dead = false
 local role = nil
 local running = false
@@ -71,13 +71,15 @@ local isPausedForSafety = false
 local savedRole = nil
 local currentHealTarget = nil 
 local currentArrestTarget = nil
-local isArrestingCombo = false
+local lastTaserTime = 0
+local TASER_COOLDOWN = 15
+local aimbotTarget = nil
 
--- placeholders for ui functions initialized later
+-- placeholders for ui functions that are built further down
 local setStatus = function(txt) end
 local updateFarmBtns = function() end
 
--- deletes doors so they dont mess up our pathfinding
+-- clears out map doors so they don't break our pathfinding routes
 local function removeDoors()
 	local count = 0
 	for _, object in pairs(workspace:GetDescendants()) do
@@ -86,10 +88,9 @@ local function removeDoors()
 			count += 1
 		end
 	end
-	print("cleaned up " .. count .. " doors")
 end
 
--- ALL 7 UI THEMES
+-- all 7 stunning ui themes
 local Themes = {
 	Dark = {
 		Main = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(18, 18, 24)), ColorSequenceKeypoint.new(0.5, Color3.fromRGB(28, 28, 36)), ColorSequenceKeypoint.new(1, Color3.fromRGB(38, 38, 48))},
@@ -152,7 +153,7 @@ local Themes = {
 local currentThemeName = "Emerald"
 local currentTheme = Themes[currentThemeName]
 
--- helper func to grab our character pieces safely
+-- grabs our character pieces safely
 local function getLatest()
 	local c = player.Character
 	if not c then return nil, nil, nil end
@@ -161,13 +162,13 @@ local function getLatest()
 	return c, h, r
 end
 
--- checks if we are spawned in and actually alive
+-- checks if spawned and alive
 local function alive()
 	local c, h, r = getLatest()
 	return (c ~= nil and h ~= nil and r ~= nil and h.Health > 0 and c.Parent ~= nil)
 end
 
--- checks if our character is sitting safely inside the ring
+-- checks if in safe zone ring
 local function inRing()
 	local c, h, r = getLatest()
 	if not (c and h and r and h.Health > 0) then return false end
@@ -176,13 +177,13 @@ local function inRing()
 	return math.abs(relative.X) <= halfSize.X and math.abs(relative.Y) <= halfSize.Y and math.abs(relative.Z) <= halfSize.Z
 end
 
--- stops the character in their tracks
+-- completely halts character movement on the spot
 local function stopCharacter()
 	local c, h, r = getLatest()
 	if h and r then pcall(function() h:MoveTo(r.Position) end) end
 end
 
--- peeks at a player's overhead UI to check for the hostile tag
+-- peeks at a player's overhead UI
 local function isHostile(targetChar)
 	local pGui = player:FindFirstChild("PlayerGui")
 	local overheadGuis = pGui and pGui:FindFirstChild("OverheadGuis")
@@ -201,7 +202,7 @@ local function isHostile(targetChar)
 	return false
 end
 
--- loops through the server and finds the closest injured person
+-- scans the server and returns the closest injured player
 local function getClosestHurtPlayer()
 	local closest, minDist = nil, math.huge
 	local c, h, r = getLatest()
@@ -221,7 +222,7 @@ local function getClosestHurtPlayer()
 	return closest
 end
 
--- loops through the server and finds the closest hostile to arrest
+-- scans the server and returns the closest hostile player
 local function getClosestHostilePlayer()
 	local closest, minDist = nil, math.huge
 	local c, h, r = getLatest()
@@ -241,24 +242,46 @@ local function getClosestHostilePlayer()
 	return closest
 end
 
--- proximity prompt hack: forces prompts to be visible and extends our reach
-task.spawn(function()
-	while not dead do
-		task.wait(1.5) 
-		for _, obj in pairs(workspace:GetDescendants()) do
-			if obj:IsA("ProximityPrompt") then
-				if obj.ActionText == "Box" or obj.Name == "Box" or obj.ObjectText == "Box" or obj.ActionText == "Arrest" then
-					obj.MaxActivationDistance = 30
-				else
-					obj.MaxActivationDistance = 10
-				end
-				obj.RequiresLineOfSight = false
-			end
+-- SMART COOLDOWN DETECTION
+local function isToolReady(toolName)
+	local bp = player:FindFirstChild("Backpack")
+	local c = player.Character
+	
+	local searchName = toolName
+	if toolName == "Box" then
+		if (bp and bp:FindFirstChild("Arrest")) or (c and c:FindFirstChild("Arrest")) then
+			searchName = "Arrest"
+		end
+	end
+	
+	local tool = (c and c:FindFirstChild(searchName)) or (bp and bp:FindFirstChild(searchName))
+	
+	if tool then
+		local readyAttr = tool:GetAttribute("Ready")
+		if readyAttr ~= nil then
+			return readyAttr == true
+		end
+		return true 
+	end
+	return false
+end
+
+-- =========================================================================
+-- CAMERA AND CHARACTER AIMBOT LOGIC
+-- =========================================================================
+RunService.RenderStepped:Connect(function()
+	if aimbotTarget and aimbotTarget.Parent and alive() then
+		local c, h, r = getLatest()
+		local targetHrp = aimbotTarget:FindFirstChild("HumanoidRootPart")
+		
+		if r and targetHrp then
+			camera.CFrame = CFrame.lookAt(camera.CFrame.Position, targetHrp.Position)
+			r.CFrame = CFrame.lookAt(r.Position, Vector3.new(targetHrp.Position.X, r.Position.Y, targetHrp.Position.Z))
 		end
 	end
 end)
 
--- pathfinding params: set slim so we fit down stairs and through doors easily
+-- pathfinding params
 local pathParams = {
 	AgentRadius = 2, 
 	AgentHeight = 5,
@@ -277,7 +300,6 @@ end
 local partPool = {}
 local jointPool = {}
 
--- Raycasts downward to find the actual floor to paint the trail exactly on the ground
 local function getFloorPosition(basePos)
 	local params = RaycastParams.new()
 	params.FilterType = Enum.RaycastFilterType.Exclude
@@ -291,9 +313,7 @@ local function getFloorPosition(basePos)
 	return basePos - Vector3.new(0, 2, 0) 
 end
 
--- draws the infinite neon trail mapped directly to the floor!
 local function drawWaypoints(waypoints)
-	-- safety check if folder got deleted
 	if not visualsFolder or not visualsFolder.Parent then
 		visualsFolder = Instance.new("Folder")
 		visualsFolder.Name = "PathVisuals"
@@ -305,11 +325,9 @@ local function drawWaypoints(waypoints)
 	
 	for i = 1, maxWpToDraw do
 		floorPositions[i] = getFloorPosition(waypoints[i].Position)
-		
 		local pos = floorPositions[i]
 		local joint = jointPool[i]
 		
-		-- FIX: explicitly set parent back to folder if reusing a cached part
 		if not joint or not joint.Parent then
 			if not joint then
 				joint = Instance.new("Part")
@@ -335,11 +353,9 @@ local function drawWaypoints(waypoints)
 				floorPositions[i+1] = getFloorPosition(waypoints[i+1].Position)
 			end
 			local nextPos = floorPositions[i+1]
-			
 			local dist = (pos - nextPos).Magnitude
 			local line = partPool[i]
 			
-			-- FIX: explicitly set parent back to folder if reusing a cached part
 			if not line or not line.Parent then
 				if not line then
 					line = Instance.new("Part")
@@ -362,7 +378,6 @@ local function drawWaypoints(waypoints)
 		end
 	end
 	
-	-- cleans up the leftover trail pieces from old paths by hiding them
 	for i = maxWpToDraw + 1, #jointPool do if jointPool[i] then jointPool[i].Parent = nil end end
 	for i = maxWpToDraw, #partPool do if partPool[i] then partPool[i].Parent = nil end end
 end
@@ -371,7 +386,6 @@ local currentWaypoints = {}
 local currentWpIndex = 1
 local isNoclipping = false
 
--- noclip loop for when we pop the anti-stuck feature
 RunService.Stepped:Connect(function()
 	if alive() then
 		local c, h, r = getLatest()
@@ -383,13 +397,14 @@ RunService.Stepped:Connect(function()
 	end
 end)
 
--- path creation loop: calculates routes actively so we never lose our target
+-- path intelligence loop (NEVER STOPS CALCULATING PATHS)
 local lastComputedTargetPos = nil
 local forceRecalculateTimer = 0
 
 task.spawn(function()
 	while not dead do
 		task.wait(0.2) 
+		-- Perfectly unblocked logic
 		if running and alive() and not isPausedForSafety then
 			local c, h, r = getLatest()
 			if r then
@@ -424,7 +439,6 @@ task.spawn(function()
 				if shouldPath and targetPos then
 					forceRecalculateTimer += 0.2
 					
-					-- actively recalculate if the target moved 2+ studs or enough time passed
 					if not lastComputedTargetPos or (lastComputedTargetPos - targetPos).Magnitude > 2 or forceRecalculateTimer >= 0.8 or #currentWaypoints == 0 then
 						forceRecalculateTimer = 0 
 						local success = pcall(function() path:ComputeAsync(r.Position, targetPos) end)
@@ -438,7 +452,6 @@ task.spawn(function()
 								drawWaypoints(currentWaypoints)
 							end
 						else
-							-- If it totally fails, just hold the last known path or wait for next tick.
 							lastComputedTargetPos = nil
 						end
 					end
@@ -448,7 +461,7 @@ task.spawn(function()
 	end
 end)
 
--- physical movement loop: physically makes the humanoid walk node to node, with obstacle avoidance
+-- physical legs loop (NEVER STOPS WALKING UNTIL 2.5 STUDS)
 task.spawn(function()
 	while not dead do
 		task.wait(0.05) 
@@ -458,13 +471,11 @@ task.spawn(function()
 			local c, h, r = getLatest()
 			if h and r then
 				
-				-- "Whiskers" (Wall Raycasting) to prevent getting stuck
 				local params = RaycastParams.new()
 				params.FilterType = Enum.RaycastFilterType.Exclude
 				params.FilterDescendantsInstances = {c, visualsFolder, ringVisualsFolder}
 				local frontHit = workspace:Raycast(r.Position, r.CFrame.LookVector * 3.5, params)
 				
-				-- if it hits something solid, vault over it
 				if frontHit and frontHit.Instance and frontHit.Instance.CanCollide then
 					h.Jump = true
 				end
@@ -472,6 +483,8 @@ task.spawn(function()
 				if #currentWaypoints > 0 and currentWpIndex <= #currentWaypoints then
 					local wp = currentWaypoints[currentWpIndex]
 					if wp.Action == Enum.PathWaypointAction.Jump then h.Jump = true end
+					
+					-- Unconditionally move towards the next path node
 					pcall(function() h:MoveTo(wp.Position) end)
 					
 					local dist = (r.Position * Vector3.new(1,0,1) - wp.Position * Vector3.new(1,0,1)).Magnitude
@@ -482,7 +495,7 @@ task.spawn(function()
 	end
 end)
 
--- anti stuck system: tracks if we've been stuck in place for 4 seconds
+-- anti-stuck loop
 local checkPos = Vector3.new()
 local timeStuck = 0
 task.spawn(function()
@@ -531,92 +544,72 @@ task.spawn(function()
 	end
 end)
 
--- super fast tool equipper so we don't stall out during combat
 local function equipToolTarget(toolName)
 	local char = player.Character
 	if not char then return false end
 	local hum = char:FindFirstChild("Humanoid")
 	local bp = player:FindFirstChild("Backpack")
 	
-	-- check if we're already holding it
-	if char:FindFirstChild(toolName) then return true end
-	
-	if bp and hum then
-		local tool = bp:FindFirstChild(toolName)
-		if tool then
-			hum:EquipTool(tool)
-			task.wait(0.1) -- tiny delay to let the equip process
-			return true
+	local searchName = toolName
+	if toolName == "Box" then
+		if (bp and bp:FindFirstChild("Arrest")) or (char:FindFirstChild("Arrest")) then
+			searchName = "Arrest"
 		end
 	end
-	return false
+	
+	if char:FindFirstChild(searchName) then return true, searchName end
+	
+	if bp and hum then
+		local tool = bp:FindFirstChild(searchName)
+		if tool then
+			hum:EquipTool(tool)
+			return true, searchName
+		end
+	end
+	return false, toolName
 end
 
--- healing logic: spams medkit and quickfix
-local function performHealSequence(targetPlayer)
+-- =================================================================================
+-- THE INSTANT 2.5-STUD REMOTE EXECUTION (No Fake Holding, Just Results)
+-- =================================================================================
+local function performInstantHeal(targetPlayer)
 	local char = player.Character
 	if not char or not targetPlayer.Character then return end
 	
-	local remoteFolder = ReplicatedStorage:FindFirstChild("Remote")
-	local healRemote = remoteFolder and remoteFolder:FindFirstChild("AttemptHeal")
-	if not healRemote then return end
-
-	local function useTool(toolName)
-		if equipToolTarget(toolName) then
-			local t = 0
-			while t < 1.2 and targetPlayer.Character do
-				local tr = targetPlayer.Character:FindFirstChild("HumanoidRootPart")
-				local hrp = char:FindFirstChild("HumanoidRootPart")
-				if tr and hrp and (hrp.Position - tr.Position).Magnitude <= 10 then 
-					healRemote:FireServer(targetPlayer)
-				end
-				t += task.wait(0.05)
-			end
-		end
+	local startRemote = ReplicatedStorage:FindFirstChild("Remote") and ReplicatedStorage.Remote:FindFirstChild("StartHeal")
+	local attemptRemote = ReplicatedStorage:FindFirstChild("Remote") and ReplicatedStorage.Remote:FindFirstChild("AttemptHeal")
+	
+	aimbotTarget = targetPlayer.Character
+	
+	if isToolReady("Medical Kit") then
+		equipToolTarget("Medical Kit")
+		if startRemote then pcall(function() startRemote:FireServer(targetPlayer) end) end
+		if attemptRemote then pcall(function() attemptRemote:FireServer(targetPlayer) end) end
+	elseif isToolReady("Quick-Fix") then
+		equipToolTarget("Quick-Fix")
+		if startRemote then pcall(function() startRemote:FireServer(targetPlayer) end) end
+		if attemptRemote then pcall(function() attemptRemote:FireServer(targetPlayer) end) end
 	end
 
-	useTool("Medical Kit")
-	useTool("Quick-Fix")
-
-	local humanoid = char:FindFirstChildOfClass("Humanoid")
-	if humanoid then humanoid:UnequipTools() end
+	aimbotTarget = nil
 end
 
--- brutal arrest logic: 1s taser spam, followed by 1s box spam, asynchronously
-local function performArrestSequence(targetPlayer)
-	local c, h = getLatest()
+local function performInstantArrest(targetPlayer)
+	local c = player.Character
 	if not c or not targetPlayer.Character then return end
 	
-	local detainRemote = ReplicatedStorage:FindFirstChild("Remote") and ReplicatedStorage.Remote:FindFirstChild("Detainment")
-	local torso = targetPlayer.Character:FindFirstChild("Torso") or targetPlayer.Character:FindFirstChild("UpperTorso")
+	aimbotTarget = targetPlayer.Character
 	
-	-- 1. yank out the taser and spam it for 1 second
-	if equipToolTarget("Taser") then
-		local taser = c:FindFirstChild("Taser")
-		local taserEvent = taser and taser:FindFirstChild("TaserEvent")
-		
-		if taserEvent and torso then
-			local startTime = tick()
-			while tick() - startTime < 1 and targetPlayer.Character and alive() do
-				task.spawn(function() pcall(function() taserEvent:InvokeServer("Tase", torso) end) end)
-				task.wait(0.1)
-			end
-		end
+	if isToolReady("Box") then
+		equipToolTarget("Box")
+		local detainRemote = ReplicatedStorage:FindFirstChild("Remote") and ReplicatedStorage.Remote:FindFirstChild("Detainment")
+		if detainRemote then pcall(function() detainRemote:FireServer(targetPlayer) end) end
 	end
 	
-	-- 2. yank out the box and spam it for 1 second
-	if equipToolTarget("Box") and detainRemote then
-		local startTime = tick()
-		while tick() - startTime < 1 and targetPlayer.Character and alive() do
-			task.spawn(function() pcall(function() detainRemote:FireServer(targetPlayer) end) end)
-			task.wait(0.1)
-		end
-	end
-	
-	if h then h:UnequipTools() end
+	aimbotTarget = nil
 end
 
--- main state machine: handles exactly what the bot should be focusing on right now
+-- the brain of the bot
 task.spawn(function()
 	while not dead do
 		task.wait(0.1) 
@@ -625,7 +618,7 @@ task.spawn(function()
 				if not alive() then
 					setStatus("waiting to respawn...")
 					currentWaypoints = {}; lastComputedTargetPos = nil; currentWpIndex = 1
-					drawWaypoints({}) -- FIX: visually clears the old path trail instantly upon death!
+					drawWaypoints({}) 
 					task.wait(1.5) 
 					return 
 				end
@@ -655,11 +648,15 @@ task.spawn(function()
 						local c, h, r = getLatest()
 						if r and tr then
 							local dist = (r.Position - tr.Position).Magnitude
-							if dist <= 3 then
-								currentWaypoints = {}; lastComputedTargetPos = nil; currentWpIndex = 1; stopCharacter()
-								performHealSequence(currentHealTarget); task.wait(0.5) 
+							
+							-- INSTANT TRIGGER: Fires remote immediately when basically touching the player (2.5 studs)
+							if dist <= 2.5 then
+								task.spawn(function()
+									pcall(function() performInstantHeal(currentHealTarget) end)
+								end)
+								setStatus("Healing: " .. currentHealTarget.DisplayName)
 							else
-								setStatus("moving to " .. currentHealTarget.DisplayName)
+								setStatus("Chasing: " .. currentHealTarget.DisplayName)
 							end
 						end
 					else
@@ -672,27 +669,33 @@ task.spawn(function()
 						if r and tr then
 							local dist = (r.Position - tr.Position).Magnitude
 							
-							-- only stop walking if we are basically touching them (3 studs)
-							if dist <= 3 then
-								currentWaypoints = {}; lastComputedTargetPos = nil; currentWpIndex = 1; stopCharacter()
-							end
-							
-							-- if they are within 30 studs, blast them while walking!
-							if dist <= 30 then
-								if not isArrestingCombo then
-									isArrestingCombo = true
+							-- INSTANT TRIGGER: Fires box remote immediately when basically touching the player (2.5 studs)
+							if dist <= 2.5 then
+								task.spawn(function()
+									pcall(function() performInstantArrest(currentArrestTarget) end)
+								end)
+								setStatus("Arresting: " .. currentArrestTarget.DisplayName)
+							else
+								-- Shoot taser on the run while outside of 2.5 studs!
+								if dist <= 30 and isToolReady("Taser") then
 									task.spawn(function()
-										performArrestSequence(currentArrestTarget)
-										isArrestingCombo = false
+										if equipToolTarget("Taser") then
+											local taser = c:FindFirstChild("Taser")
+											local taserEvent = taser and taser:FindFirstChild("TaserEvent")
+											local torso = tr.Parent:FindFirstChild("Torso") or tr.Parent:FindFirstChild("UpperTorso")
+											if taserEvent and torso then
+												aimbotTarget = tr.Parent
+												local startTime = tick()
+												while tick() - startTime < 1 and tr.Parent and alive() do
+													pcall(function() taserEvent:InvokeServer("Tase", torso) end)
+													task.wait(0.1)
+												end
+												aimbotTarget = nil
+											end
+										end
+										equipToolTarget("Box")
 									end)
 								end
-								
-								if dist > 3 then
-									setStatus("Chasing & Attacking: " .. currentArrestTarget.DisplayName)
-								else
-									setStatus("Arresting: " .. currentArrestTarget.DisplayName)
-								end
-							else
 								setStatus("Pursuing hostile: " .. currentArrestTarget.DisplayName)
 							end
 						end
@@ -705,7 +708,7 @@ task.spawn(function()
 	end
 end)
 
--- ui stuff down below (animations, dragging, whitelists, themes)
+-- ui stuff down below
 local mobileMode = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
 local tweenFast = TweenInfo.new(0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 local tweenSmooth = TweenInfo.new(0.35, Enum.EasingStyle.Quart, Enum.EasingDirection.Out)
@@ -861,6 +864,7 @@ _G.AsylumFarmKill = function()
 	dead = true
 	running = false
 	role = nil
+	aimbotTarget = nil
 	if targetHighlight then targetHighlight:Destroy() end
 	if screenGui and screenGui.Parent then screenGui:Destroy() end
 	_G.AsylumFarmKill = nil
@@ -1087,7 +1091,7 @@ arrestBtn.Size = UDim2.new(0, 120, 0, 42)
 arrestBtn.Position = UDim2.new(0, 140, 0, 60)
 arrestBtn.Font = Enum.Font.GothamBold
 arrestBtn.TextSize = 13
-arrestBtn.Text = "AUTO ARREST"
+arrestBtn.Text = "ARREST"
 arrestBtn.AutoButtonColor = false
 makeCorner(arrestBtn, 8)
 local arrestGrad = makeGradient(arrestBtn, 135)
@@ -1114,7 +1118,7 @@ updateFarmBtns = function()
 	farmerBtn.Text = "FARMER"
 	feederBtn.Text = "FEEDER"
 	healerBtn.Text = "HEALER"
-	arrestBtn.Text = "AUTO ARREST"
+	arrestBtn.Text = "ARREST"
 
 	if running then
 		if role == "FARMER" then 
@@ -1138,8 +1142,9 @@ setStatus = function(txt) if statusLbl then statusLbl.Text = "Status: " .. txt e
 local function resetBotState()
 	running = false; role = nil; targetHighlight.Adornee = nil
 	currentWaypoints = {}; lastComputedTargetPos = nil; currentWpIndex = 1
-	drawWaypoints({}) -- instantly clears trail
-	stopCharacter(); setStatus("Idle")
+	aimbotTarget = nil
+	drawWaypoints({}) 
+	setStatus("Idle")
 end
 
 farmerBtn.MouseButton1Click:Connect(function()
@@ -1158,7 +1163,7 @@ healerBtn.MouseButton1Click:Connect(function()
 end)
 
 arrestBtn.MouseButton1Click:Connect(function()
-	if role == "ARREST" and running then resetBotState() else role = "ARREST"; running = true; setStatus("Initializing Auto-Arrest..."); removeDoors() end
+	if role == "ARREST" and running then resetBotState() else role = "ARREST"; running = true; setStatus("Initializing Arrest..."); removeDoors() end
 	updateFarmBtns()
 end)
 
@@ -1306,7 +1311,7 @@ previewLabel.Size = UDim2.new(1, -20, 1, 0)
 previewLabel.Font = Enum.Font.GothamMedium
 previewLabel.TextSize = 14
 previewLabel.TextXAlignment = Enum.TextXAlignment.Left
-previewLabel.Text = "Current Theme: Emerald"
+previewLabel.Text = "Current Theme: Dark"
 
 local categoryButtons = {}
 local themeButtons = {}
@@ -1480,7 +1485,6 @@ local function switchCategory(index)
 	tweenObject(titleUnderline, TweenInfo.new(0.4, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {Size = UDim2.new(0, titleWidth, 0, 3)})
 end
 
--- the master theme applier function
 local function applyTheme(themeName)
 	local theme = Themes[themeName]
 	if not theme then return end
@@ -1500,7 +1504,6 @@ local function applyTheme(themeName)
 	end
 	for _, data in pairs(whitelistButtons) do if data.Update then data.Update() end end
 	
-	-- syncs the path visualizer to the new theme!
 	if visualsFolder then 
 		for _, part in ipairs(visualsFolder:GetChildren()) do 
 			if part:IsA("BasePart") and part.Color ~= Color3.fromRGB(255, 100, 100) then 
@@ -1603,7 +1606,7 @@ RunService.Heartbeat:Connect(function(deltaTime)
 	end
 	if dangerFound then
 		if running then
-			savedRole = role; running = false; isPausedForSafety = true; currentWaypoints = {}; lastComputedTargetPos = nil; currentWpIndex = 1; stopCharacter(); updateFarmBtns(); setStatus("TERMINATING")
+			savedRole = role; running = false; isPausedForSafety = true; currentWaypoints = {}; lastComputedTargetPos = nil; currentWpIndex = 1; stopCharacter(); drawWaypoints({}); updateFarmBtns(); setStatus("TERMINATING")
 			local c, h = getLatest(); if h then h.Health = 0 end
 		end
 	else
